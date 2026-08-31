@@ -1,0 +1,23 @@
+{
+ "walk_forward": {
+  "weeks": 26,
+  "lr_mean": 0.5180479242979243,
+  "lr_weighted": 0.5180479242979243,
+  "gb_mean": 0.5170177045177046,
+  "gb_weighted": 0.5170177045177046,
+  "lr_beats_coin_folds": 23,
+  "gb_beats_coin_folds": 23,
+  "logloss_base": 0.6931471805599455,
+  "logloss_lr": 0.692173118622073,
+  "logloss_gb": 0.6920095705153982
+ },
+ "mi_bits": {
+  "prev dir": 0.00023965680122822654,
+  "RSI decile": 0.0011278465080427048,
+  "hist last 3": 0.0005601677295579012,
+  "band position quintile": 0.0008676708228426777,
+  "vol regime quartile": 2.83151720492505e-05,
+  "shape 12-cell": 0.0005583495720188529,
+  "hour of day": 0.00012561319115410763
+ }
+}

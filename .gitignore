@@ -1,0 +1,47 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated datasets and model artifacts
+/data/
+/recorder/data/
+/recorder/docker-test-data/
+*.parquet
+*.arrow
+*.feather
+*.log
+*.tmp
+
+# Large reproducible trade-level outputs
+/research/results/**/*.csv
+/research/results/**/*.jsonl
+
+# Runtime state for the paper bot
+/backups/
+/runtime/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.jsonl.zst
+*.heartbeat
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/

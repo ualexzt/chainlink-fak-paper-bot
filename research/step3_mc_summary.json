@@ -1,0 +1,31 @@
+{
+ "R": 2000,
+ "min_n=20": {
+  "real_max_dev_from_half": 0.1216216216216216,
+  "null_mean": 0.07406468279461983,
+  "null_p95": 0.14864864864864868,
+  "null_p99": 0.2027027027027027,
+  "null_max": 0.2567567567567568,
+  "empirical_p_value": 0.176,
+  "real_perfect_patterns": 0,
+  "null_perfect_patterns_mean": 0.0,
+  "null_perfect_patterns_max": 0
+ },
+ "min_n=100": {
+  "real_max_dev_from_half": 0.0498768472906404,
+  "null_mean": 0.04158221816078698,
+  "null_p95": 0.06097560975609756,
+  "null_p99": 0.07389222905657103,
+  "null_max": 0.09552845528455284,
+  "empirical_p_value": 0.163,
+  "real_perfect_patterns": 0,
+  "null_perfect_patterns_mean": 0.0,
+  "null_perfect_patterns_max": 0
+ },
+ "perfect_n>=10": {
+  "real": 0,
+  "null_mean": 0.0,
+  "null_p95": 0.0,
+  "null_max": 0
+ }
+}

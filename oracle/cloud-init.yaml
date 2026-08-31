@@ -1,0 +1,16 @@
+#cloud-config
+# Oracle Cloud Ubuntu 22.04/24.04 bootstrap for pm-recorder
+package_update: true
+packages: [ca-certificates, curl, git]
+runcmd:
+  # Docker (official convenience script)
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+  # swap (important on 1GB micro shapes)
+  - fallocate -l 2G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  # project dir
+  - mkdir -p /opt/recorder/data
