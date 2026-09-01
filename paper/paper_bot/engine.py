@@ -84,6 +84,7 @@ class PaperEngine:
         self._running = False
         self.experiment_hash: str | None = None
         self.storage_critical_reason: str | None = None
+        self.dashboard_critical_reason: str | None = None
         self.processing_critical_reason: str | None = None
         self.discovery_critical_reason: str | None = None
         self.settlement_critical_reason: str | None = None
@@ -129,6 +130,7 @@ class PaperEngine:
         for market_id, persisted in by_id.items():
             self._restore_market(persisted, self.markets[market_id])
         self._initialized = True
+        self._write_dashboard_snapshot()
 
     def _strategy(self) -> MarketStrategyState:
         assert self.experiment_hash is not None
@@ -226,6 +228,7 @@ class PaperEngine:
         return (
             journaled
             and self.storage_critical_reason is None
+            and self.dashboard_critical_reason is None
             and self.processing_critical_reason is None
             and self.discovery_critical_reason is None
             and self.journal.writable()
@@ -236,6 +239,88 @@ class PaperEngine:
             market.up_token_id: self.books[market.up_token_id],
             market.down_token_id: self.books[market.down_token_id],
         }
+
+    def _dashboard_payload(self) -> dict[str, Any]:
+        """Build a strictly public, Decimal-preserving view for TUI readers."""
+        # ResolverState intentionally rejects epoch zero; test clocks and a
+        # freshly-started process may still report it, so keep the dashboard
+        # path observational instead of turning that into a health fault.
+        now_ms = max(1, self._now_ms())
+        markets = []
+        for market_id, market in sorted(self.markets.items()):
+            if market_id in self._inactive:
+                continue
+            books: dict[str, Any] = {}
+            for side, token_id in (("UP", market.up_token_id), ("DOWN", market.down_token_id)):
+                book = self.books[token_id]
+                levels = ()
+                asks = ()
+                if book.valid:
+                    try:
+                        levels, asks = book.executable_bids(), book.executable_asks()
+                    except InvalidBook:
+                        levels, asks = (), ()
+                books[side] = {
+                    "valid": book.valid,
+                    "generation": book.generation,
+                    "best_bid": None if not levels else levels[0].price,
+                    "best_ask": None if not asks else asks[0].price,
+                    "bid_depth": sum((level.shares for level in levels), start=0),
+                    "ask_depth": sum((level.shares for level in asks), start=0),
+                }
+            markets.append({
+                "market_id": market_id, "symbol": market.symbol, "slug": market.slug,
+                "mkt_ts": market.mkt_ts, "close_ts": market.end_ts,
+                "status": "SETTLED" if market_id in self._settled else "OPEN",
+                "inactive": market_id in self._inactive, "books": books,
+            })
+        resolver = []
+        for symbol in self.settings.symbols:
+            candidates = sorted(
+                (market for market in self.markets.values()
+                 if market.symbol == symbol and market.market_id not in self._inactive),
+                key=lambda item: item.mkt_ts,
+            )
+            for market in candidates:
+                try:
+                    view = self.resolver.view(symbol, market.mkt_ts, now_ms)
+                except ValueError:
+                    continue
+                resolver.append({
+                    "symbol": symbol, "market_id": market.market_id,
+                    "current": view.current, "start": view.start,
+                    "observation_ts_ms": view.observation_ts_ms, "age_ms": view.age_ms,
+                    "fresh": view.fresh, "distance": view.distance,
+                    "distance_bps": view.distance_bps, "leader": view.leader,
+                    "momentum_5s_bps": view.momentum_5s_bps,
+                })
+                break
+        return {
+            "version": 1, "experiment_hash": self.experiment_hash,
+            "markets": markets, "resolver": resolver,
+            "health": {
+                "storage": self.storage_critical_reason,
+                "dashboard": self.dashboard_critical_reason,
+                "processing": self.processing_critical_reason,
+                "discovery": self.discovery_critical_reason,
+                "settlement": self.settlement_critical_reason,
+                "journal_writable": self.journal.writable(),
+                "journal_reason": None if self.journal.critical_state is None else self.journal.critical_state.reason,
+                "disk_free_bytes": self.journal.disk_free_bytes(),
+                "disk_min_free_bytes": self.journal.min_free_bytes,
+                "pending_storage": self._pending_storage_events is not None,
+            },
+        }
+
+    def _write_dashboard_snapshot(self) -> None:
+        # A successful retry must publish recovered health in that same atomic row.
+        self.dashboard_critical_reason = None
+        try:
+            self.storage.write_dashboard_snapshot(self._dashboard_payload(), self._now_ms())
+        except Exception as exc:
+            self.dashboard_critical_reason = type(exc).__name__
+        else:
+            self.dashboard_critical_reason = None
 
     def _reverse_events(self, market: MarketDefinition, event_ts_ms: int, now_s: int) -> tuple[Any, ...]:
         results: list[Any] = []
@@ -414,13 +499,16 @@ class PaperEngine:
                 return
             self._settled.add(market.market_id)
             self._inactive.add(market.market_id)
+            self.positions[market.market_id] = {}
             self._subscriptions_changed.set()
+            self._write_dashboard_snapshot()
 
     async def discover_markets(self) -> None:
         definitions = await self.gamma.discover_current_and_next(self.settings.symbols, self._now_s())
         now_s = self._now_s()
         self._register_markets(market for market in definitions if market.end_ts > now_s)
         self._retire_expired_empty_markets(now_s)
+        self._write_dashboard_snapshot()
 
     async def _event_loop(self) -> None:
         while True:
@@ -466,6 +554,7 @@ class PaperEngine:
                 pass
             await self._retry_pending_storage()
             self._retire_expired_empty_markets(self._now_s())
+            self._write_dashboard_snapshot()
             await self._sleep(self.heartbeat_interval)
 
     async def _market_feed_supervisor(self) -> None:

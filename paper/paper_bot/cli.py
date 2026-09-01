@@ -10,15 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import aiohttp
-import websockets
-
 from .config import Settings, load_settings
-from .engine import PaperEngine
-from .gamma import GammaClient
-from .journal import RawJournal
-from .market_ws import MarketWsClient
-from .rtds import RtdsClient
 from .storage import Storage
 
 _PUBLIC_SETTING_NAMES = {
@@ -37,6 +29,13 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("engine", help="run the strictly paper-only engine")
     commands.add_parser("status", help="print a read-only SQLite snapshot")
     commands.add_parser("check-db", help="run read-only SQLite integrity checks")
+    watch = commands.add_parser("watch", help="attach a read-only terminal dashboard")
+    watch.add_argument("--db", required=True, help="SQLite database path")
+    watch.add_argument("--refresh", type=float, default=1.0, help="refresh interval in seconds")
+    watch.add_argument("--asset", choices=("btc", "eth", "sol"))
+    watch.add_argument("--threshold")
+    watch.add_argument("--confirmation")
+    watch.add_argument("--policy")
     return parser
 
 
@@ -77,6 +76,13 @@ def _check_db(settings: Settings) -> int:
 
 
 async def _run_engine(settings: Settings) -> int:
+    import aiohttp
+    import websockets
+    from .engine import PaperEngine
+    from .gamma import GammaClient
+    from .journal import RawJournal
+    from .market_ws import MarketWsClient
+    from .rtds import RtdsClient
     storage = Storage(_database_path(settings))
     journal = RawJournal(settings.data_dir / "raw-journal")
     async with aiohttp.ClientSession() as session:
@@ -123,6 +129,12 @@ async def _run_engine(settings: Settings) -> int:
 
 def main(argv: Sequence[str] | None = None, *, environment: Mapping[str, str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "watch":
+        from .tui import watch
+        return watch(
+            args.db, args.refresh, asset=args.asset, threshold=args.threshold,
+            confirmation=args.confirmation, policy=args.policy,
+        )
     settings = _settings(environment)
     if args.command == "status":
         return _status(settings)

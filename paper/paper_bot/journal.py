@@ -155,6 +155,16 @@ class RawJournal:
     def critical_state(self) -> JournalCriticalState | None:
         return self._critical
 
+    def disk_free_bytes(self) -> int | None:
+        """Return public disk capacity telemetry without exposing paths or errors."""
+        try:
+            free = self._disk_usage(self.root).free
+        except OSError:
+            return None
+        if isinstance(free, bool) or not isinstance(free, int) or free < 0:
+            return None
+        return free
+
     def _fail(self, reason: str) -> JournalError:
         if self._critical is None:
             self._critical = JournalCriticalState(reason)

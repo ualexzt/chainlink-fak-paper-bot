@@ -20,7 +20,7 @@ TABLES = (
     "experiment_versions", "markets", "tokens", "resolver_observations",
     "book_generations", "signals", "paper_orders", "paper_fill_legs",
     "inventory_lots", "reverse_sequences", "settlements", "lane_results",
-    "health_events",
+    "health_events", "dashboard_snapshots", "dashboard_market_metadata",
 )
 EXPERIMENT_SCHEMA_VERSION = "chainlink-fak-paper-v1"
 ZERO = Decimal("0")
@@ -59,6 +59,15 @@ class DashboardSnapshot:
     signals: int
     settlements: int
     health_events: int
+
+
+@dataclass(frozen=True)
+class DashboardReadModel:
+    snapshot: Mapping[str, Any] | None
+    market_metadata: tuple[Mapping[str, Any], ...]
+    entries: tuple[Mapping[str, Any], ...]
+    inventory: tuple[Mapping[str, Any], ...]
+    health_events: tuple[Mapping[str, Any], ...]
 
 
 def canonical_decimal(value: Decimal) -> str:
@@ -380,6 +389,18 @@ CREATE TABLE IF NOT EXISTS health_events(
     kind TEXT NOT NULL,
     payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS dashboard_snapshots(
+    snapshot_id INTEGER PRIMARY KEY CHECK(snapshot_id=1),
+    snapshot_ts_ms INTEGER NOT NULL CHECK(snapshot_ts_ms>=0),
+    payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dashboard_market_metadata(
+    experiment_hash TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    symbol TEXT NOT NULL CHECK(symbol IN ('btc','eth','sol')),
+    slug TEXT NOT NULL,
+    PRIMARY KEY(experiment_hash,market_id)
+);
 """
 
 
@@ -412,6 +433,9 @@ class Storage:
             missing = set(TABLES) - {
                 row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
+            # Dashboard tables are additive; an old database remains safely
+            # attachable in read-only mode until the engine migrates it.
+            missing.difference_update({"dashboard_snapshots", "dashboard_market_metadata"})
             if missing:
                 raise StorageInvariantError("storage schema is incomplete")
             return
@@ -864,8 +888,131 @@ class Storage:
             health_events=scalar("SELECT COUNT(*) FROM health_events"),
         )
 
+    def write_dashboard_snapshot(self, snapshot: Mapping[str, Any], snapshot_ts_ms: int) -> None:
+        """Atomically replace the latest sanitized, canonical dashboard view."""
+        db = self._writable()
+        if isinstance(snapshot_ts_ms, bool) or not isinstance(snapshot_ts_ms, int) or snapshot_ts_ms < 0:
+            raise StorageInvariantError("snapshot timestamp must be a nonnegative integer")
+        if not isinstance(snapshot, Mapping):
+            raise TypeError("snapshot must be a mapping")
+        payload = _json(snapshot)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute(
+                "INSERT INTO dashboard_snapshots(snapshot_id,snapshot_ts_ms,payload_json) VALUES (1,?,?) "
+                "ON CONFLICT(snapshot_id) DO UPDATE SET snapshot_ts_ms=excluded.snapshot_ts_ms,payload_json=excluded.payload_json",
+                (snapshot_ts_ms, payload),
+            )
+            experiment_hash, markets = snapshot.get("experiment_hash"), snapshot.get("markets", ())
+            if experiment_hash is not None:
+                if (not isinstance(experiment_hash, str) or len(experiment_hash) != 64
+                        or not isinstance(markets, (list, tuple))):
+                    raise StorageInvariantError("snapshot market metadata is invalid")
+                for raw_market in markets:
+                    if not isinstance(raw_market, Mapping):
+                        raise StorageInvariantError("snapshot market must be a mapping")
+                    market_id, symbol, slug = (
+                        raw_market.get("market_id"), raw_market.get("symbol"), raw_market.get("slug")
+                    )
+                    if not all(isinstance(value, str) and value for value in (market_id, symbol, slug)):
+                        raise StorageInvariantError("snapshot market identity is invalid")
+                    db.execute(
+                        "INSERT OR IGNORE INTO dashboard_market_metadata VALUES (?,?,?,?)",
+                        (experiment_hash, market_id, symbol, slug),
+                    )
+                    identity = db.execute(
+                        "SELECT symbol,slug FROM dashboard_market_metadata WHERE experiment_hash=? AND market_id=?",
+                        (experiment_hash, market_id),
+                    ).fetchone()
+                    if identity is None or tuple(identity) != (symbol, slug):
+                        raise StorageInvariantError("snapshot market identity changed")
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    def load_dashboard_snapshot(self) -> Mapping[str, Any] | None:
+        """Return the last complete snapshot, or None for an old/empty DB."""
+        db = self._connection()
+        try:
+            row = db.execute(
+                "SELECT snapshot_ts_ms,payload_json FROM dashboard_snapshots WHERE snapshot_id=1"
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return None
+            raise
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise StorageInvariantError("dashboard snapshot JSON is invalid") from exc
+        if not isinstance(payload, Mapping):
+            raise StorageInvariantError("dashboard snapshot must be a mapping")
+        return {"snapshot_ts_ms": row["snapshot_ts_ms"], **payload}
+
+    def load_dashboard_read_model(self) -> DashboardReadModel:
+        """Load one read-only accounting/telemetry view for the terminal UI."""
+        db = self._connection()
+        db.execute("BEGIN")
+        try:
+            result = self._load_dashboard_read_model(db)
+            db.commit()
+            return result
+        except Exception:
+            db.rollback()
+            raise
+
+    def _load_dashboard_read_model(self, db: sqlite3.Connection) -> DashboardReadModel:
+        snapshot = self.load_dashboard_snapshot()
+        experiment_hash = None if snapshot is None else snapshot.get("experiment_hash")
+        if experiment_hash is not None and not isinstance(experiment_hash, str):
+            raise StorageInvariantError("dashboard experiment hash is invalid")
+        experiment_filter = "" if experiment_hash is None else " AND s.experiment_hash=?"
+        args: tuple[Any, ...] = () if experiment_hash is None else (experiment_hash,)
+        try:
+            metadata = tuple(dict(row) for row in db.execute(
+                "SELECT experiment_hash,market_id,symbol,slug FROM dashboard_market_metadata" +
+                ("" if experiment_hash is None else " WHERE experiment_hash=?") +
+                " ORDER BY market_id", args,
+            ))
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            metadata = ()
+        entries = tuple(dict(row) for row in db.execute(
+            """SELECT s.experiment_hash,s.market_id,s.threshold,s.confirmation,s.policy,s.side,
+                      m.close_ts,o.status,o.requested_quote,o.requested_shares,
+                      o.filled_shares,o.quote_amount,o.fee,
+                      lr.net_pnl,lr.result_json,rr.payload_json AS reverse_json
+               FROM signals s
+               JOIN markets m ON m.experiment_hash=s.experiment_hash AND m.market_id=s.market_id
+               JOIN paper_orders o ON o.signal_id=s.signal_id AND o.role='ENTRY'
+               LEFT JOIN lane_results lr ON lr.experiment_hash=s.experiment_hash
+                    AND lr.market_id=s.market_id AND lr.threshold=s.threshold
+                    AND lr.confirmation=s.confirmation AND lr.policy=s.policy
+               LEFT JOIN signals sr ON sr.experiment_hash=s.experiment_hash
+                    AND sr.market_id=s.market_id AND sr.threshold=s.threshold
+                    AND sr.confirmation=s.confirmation AND sr.policy=s.policy AND sr.phase='REVERSE'
+               LEFT JOIN reverse_sequences rr ON rr.signal_id=sr.signal_id
+               WHERE s.phase='ENTRY'""" + experiment_filter +
+            " ORDER BY s.threshold,s.confirmation,s.policy,m.close_ts,s.market_id", args,
+        ))
+        inventory = tuple(dict(row) for row in db.execute(
+            """SELECT experiment_hash,market_id,threshold,confirmation,policy,
+                      token_id,side,shares,source
+               FROM inventory_lots WHERE open=1""" +
+            ("" if experiment_hash is None else " AND experiment_hash=?") +
+            " ORDER BY market_id,threshold,confirmation,policy,lot_id", args,
+        ))
+        health = tuple(dict(row) for row in db.execute(
+            "SELECT event_ts_ms,kind,payload_json FROM health_events ORDER BY id DESC LIMIT 30"
+        ))
+        return DashboardReadModel(snapshot, metadata, entries, inventory, health)
+
 
 __all__ = [
-    "DashboardSnapshot", "PersistedMarketState", "PersistedPosition", "Storage",
+    "DashboardReadModel", "DashboardSnapshot", "PersistedMarketState", "PersistedPosition", "Storage",
     "StorageInvariantError", "TABLES", "canonical_decimal",
 ]

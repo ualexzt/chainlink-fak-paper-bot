@@ -487,6 +487,57 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli_main(["trade"], environment={})
 
+    async def test_dashboard_snapshot_contains_live_books_resolver_and_public_health(self):
+        definition = market()
+        engine = await self.make_engine((definition,), db_name="dashboard.db")
+        await self.seed_books(engine, definition)
+        await engine.process_resolver_event(ResolverObservation(
+            "btc", D("100"), 900_000, 900_000,
+            {"topic": "crypto_prices_twap_sixty", "type": "update", "payload": {
+                "symbol": "btc/usd", "full_accuracy_value": "100000000000000000000",
+                "timestamp": 900_000, "window_s": 60,
+            }},
+        ))
+        await engine.process_resolver_event(ResolverObservation(
+            "btc", D("101"), 1_100_000, 1_100_000,
+            {"topic": "crypto_prices_twap_sixty", "type": "update", "payload": {
+                "symbol": "btc/usd", "full_accuracy_value": "101000000000000000000",
+                "timestamp": 1_100_000, "window_s": 60,
+            }},
+        ))
+        engine._write_dashboard_snapshot()
+        snapshot = engine.storage.load_dashboard_snapshot()
+        self.assertEqual(snapshot["markets"][0]["symbol"], "btc")
+        self.assertEqual(snapshot["markets"][0]["slug"], definition.slug)
+        self.assertEqual(snapshot["markets"][0]["books"]["UP"]["best_ask"], "0.79")
+        self.assertEqual(snapshot["markets"][0]["books"]["DOWN"]["ask_depth"], "20")
+        self.assertEqual(snapshot["resolver"][0]["start"], "100")
+        self.assertEqual(snapshot["resolver"][0]["current"], "101")
+        self.assertTrue(snapshot["health"]["journal_writable"])
+        self.assertIsInstance(snapshot["health"]["disk_free_bytes"], int)
+
+    async def test_transient_dashboard_write_failure_gates_then_recovers(self):
+        engine = await self.make_engine((market(),), db_name="dashboard-retry.db")
+        original = engine.storage.write_dashboard_snapshot
+        first = [True]
+
+        def fail_once(payload, timestamp):
+            if first[0]:
+                first[0] = False
+                raise OSError("injected private dashboard detail")
+            return original(payload, timestamp)
+
+        engine.storage.write_dashboard_snapshot = fail_once
+        try:
+            engine._write_dashboard_snapshot()
+            self.assertEqual(engine.dashboard_critical_reason, "OSError")
+            self.assertFalse(engine._strategy_writable(True))
+            engine._write_dashboard_snapshot()
+        finally:
+            engine.storage.write_dashboard_snapshot = original
+        self.assertIsNone(engine.dashboard_critical_reason)
+        self.assertTrue(engine._strategy_writable(True))
+
 
 if __name__ == "__main__":
     unittest.main()

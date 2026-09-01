@@ -317,6 +317,40 @@ class StorageTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(StorageInvariantError):
                 canonical_decimal(value)
 
+    def test_dashboard_snapshot_is_atomic_canonical_and_readable(self):
+        self.storage.write_dashboard_snapshot(
+            {"experiment_hash": self.experiment_hash, "health": {"processing": None},
+             "book": {"ask": D("0.9000")}, "markets": [{
+                 "market_id": "market-1", "symbol": "btc", "slug": "btc-updown-5m-1000",
+             }]}, 1_234
+        )
+        first = self.storage.load_dashboard_snapshot()
+        self.assertEqual(first["snapshot_ts_ms"], 1_234)
+        self.assertEqual(first["book"]["ask"], "0.9")
+        self.assertEqual(self.storage.load_dashboard_read_model().market_metadata[0]["symbol"], "btc")
+        self.storage.write_dashboard_snapshot(
+            {"experiment_hash": self.experiment_hash, "health": {"processing": "ValueError"},
+             "markets": [{"market_id": "market-1", "symbol": "btc",
+                           "slug": "btc-updown-5m-1000"}]}, 1_235,
+        )
+        self.assertEqual(self.storage.load_dashboard_snapshot()["snapshot_ts_ms"], 1_235)
+        with self.assertRaisesRegex(StorageInvariantError, "identity changed"):
+            self.storage.write_dashboard_snapshot(
+                {"experiment_hash": self.experiment_hash, "markets": [{
+                    "market_id": "market-1", "symbol": "eth", "slug": "eth-updown-5m-1000",
+                }]}, 1_236,
+            )
+        self.assertEqual(self.storage.load_dashboard_snapshot()["snapshot_ts_ms"], 1_235)
+        self.storage.close()
+        readonly = Storage(self.db_path, read_only=True)
+        try:
+            readonly.initialize()
+            self.assertEqual(readonly.load_dashboard_snapshot()["health"]["processing"], "ValueError")
+            with self.assertRaises(sqlite3.OperationalError):
+                readonly.write_dashboard_snapshot({}, 1_236)
+        finally:
+            readonly.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -155,6 +155,7 @@ class JournalTests(unittest.TestCase):
         usage = lambda _path: shutil._ntuple_diskusage(1000, 900, free[0])
         self.journal.close()
         self.journal = RawJournal(self.root, min_free_bytes=100, disk_usage=usage, on_critical=states.append)
+        self.assertEqual(self.journal.disk_free_bytes(), 100)
         self.assertTrue(self.journal.writable())
         free[0] = 99
         self.assertFalse(self.journal.writable())
@@ -174,6 +175,7 @@ class JournalTests(unittest.TestCase):
             on_critical=states.append,
         )
         self.assertFalse(self.journal.writable())
+        self.assertIsNone(self.journal.disk_free_bytes())
         self.assertEqual(states[0].reason, "journal_disk_check_failed")
         self.assertNotIn("sensitive", repr(states[0]))
 
