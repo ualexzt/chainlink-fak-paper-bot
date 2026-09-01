@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 from numbers import Integral
+from time import monotonic_ns
 
 from .books import InvalidBook, OrderBook
-from .domain import FakResult
-from .fak import simulate_buy_fak
+from .domain import FakResult, InventoryLot, ReverseSequence
+from .fak import (
+    buy_maker_amount_for_target_shares,
+    quote_for_target_shares,
+    simulate_buy_fak,
+    simulate_sell_fak,
+)
 from .gamma import MarketDefinition
 from .resolver import ResolverState, ResolverView
-
 
 class Confirmation(str, Enum):
     BOOK_ONLY = "BOOK_ONLY"
@@ -99,6 +104,7 @@ class MarketStrategyState:
         thresholds: Sequence[Decimal] | None = None,
         paper_notional_usd: Decimal = Decimal("5.00"),
         config_hash: str | None = None,
+        clock_ns: Callable[[], int] = monotonic_ns,
     ) -> None:
         self.thresholds = DEFAULT_THRESHOLDS if thresholds is None else _validated_thresholds(thresholds)
         if (
@@ -116,12 +122,16 @@ class MarketStrategyState:
             or any(character not in "0123456789abcdef" for character in config_hash)
         ):
             raise ValueError("config_hash must be a lowercase SHA-256 hex digest")
+        if not callable(clock_ns):
+            raise ValueError("clock_ns must be callable")
 
         self.paper_notional_usd = paper_notional_usd
         self.config_hash = config_hash
+        self._clock_ns = clock_ns
         self._attempted: set[tuple[Decimal, Confirmation]] = set()
         self._previous: dict[str, tuple[int, Decimal]] = {}
         self._market_key: tuple[str, int] | None = None
+        self._reverse_attempted: set[LaneKey] = set()
 
     def on_book_event(
         self,
@@ -133,11 +143,7 @@ class MarketStrategyState:
     ) -> tuple[StrategyEvent, ...]:
         event_ts_ms = _validate_nonnegative_integer(event_ts_ms, "event_ts_ms")
         now_ts = _validate_nonnegative_integer(now_ts, "now_ts")
-        market_key = (market.market_id, market.mkt_ts)
-        if self._market_key is None:
-            self._market_key = market_key
-        elif self._market_key != market_key:
-            raise ValueError("MarketStrategyState cannot be reused across markets")
+        self._bind_market(market)
 
         current: dict[str, tuple[int, Decimal]] = {}
         side_books: dict[str, OrderBook] = {}
@@ -231,6 +237,187 @@ class MarketStrategyState:
         return momentum is not None and (
             (side == "UP" and momentum > 0) or (side == "DOWN" and momentum < 0)
         )
+
+    def on_reverse_event(
+        self,
+        lane: LaneKey,
+        entry: StrategyEvent,
+        market: MarketDefinition,
+        books: Mapping[str, OrderBook],
+        resolver: ResolverState,
+        event_ts_ms: int,
+        now_ts: int,
+    ) -> ReverseSequence | None:
+        """Attempt the lane's single non-atomic reverse, if its policy fires."""
+        event_ts_ms = _validate_nonnegative_integer(event_ts_ms, "event_ts_ms")
+        now_ts = _validate_nonnegative_integer(now_ts, "now_ts")
+        self._bind_market(market)
+        self._validate_reverse_identity(lane, entry, market)
+        if lane.policy is PositionPolicy.HOLD or lane in self._reverse_attempted:
+            return None
+        if entry.fak.filled_shares <= 0 or event_ts_ms <= entry.event_ts_ms:
+            return None
+        if market.end_ts - now_ts <= 0:
+            return None
+
+        old_side = entry.side
+        new_side = "DOWN" if old_side == "UP" else "UP"
+        try:
+            old_book = _book_for_side(books, market, old_side)
+            new_book = _book_for_side(books, market, new_side)
+            old_bids = old_book.executable_bids()
+            new_asks = new_book.executable_asks()
+        except (KeyError, InvalidBook):
+            return None
+        if not new_asks or not (Decimal("0.89") <= new_asks[0].price <= Decimal("0.90")):
+            return None
+        if lane.policy is PositionPolicy.CHAINLINK_REVERSE:
+            try:
+                view = resolver.view(market.symbol, market.mkt_ts, now_ts * 1000)
+            except (AttributeError, KeyError, ValueError):
+                return None
+            if not self._gate(Confirmation.CHAINLINK_CONFIRMED, new_side, view):
+                return None
+
+        sell = simulate_sell_fak(
+            old_bids,
+            entry.fak.filled_shares,
+            market.tick_size,
+            market.tick_size,
+            market.min_order_shares,
+            market.fee_schedule,
+        )
+        sell_completed_ns = self._clock_ns()
+        sold = sell.filled_shares
+        residual = entry.fak.filled_shares - sold
+        dust = entry.fak.filled_shares - sell.submitted_maker_amount
+        lots = self._inventory_lots(market, old_side, new_side, residual, Decimal("0"))
+        if sold <= 0:
+            result = ReverseSequence(
+                lane=lane,
+                market_id=market.market_id,
+                mkt_ts=market.mkt_ts,
+                config_hash=entry.config_hash,
+                old_side=old_side,
+                new_side=new_side,
+                status="COMPLETE",
+                outcome="ZERO_SELL",
+                transitions=("ELIGIBLE", "SELL_ATTEMPTED", "SELL_FILLED_OR_PARTIAL", "COMPLETE"),
+                requested_shares=entry.fak.filled_shares,
+                sold_shares=sold,
+                old_residual_shares=residual,
+                submission_dust_shares=max(Decimal("0"), dust),
+                opposite_shares=Decimal("0"),
+                expected_quote=Decimal("0"),
+                sell=sell,
+                buy=None,
+                inventory_lots=lots,
+                sell_book_generation=old_book.generation,
+                buy_book_generation=None,
+                trigger_ts_ms=event_ts_ms,
+                leg_elapsed_ms=None,
+            )
+            self._reverse_attempted.add(lane)
+            return result
+
+        expected = quote_for_target_shares(new_asks, sold, Decimal("0.90"))
+        maker_quote = buy_maker_amount_for_target_shares(sold, Decimal("0.90"), market.tick_size)
+        buy_started_ns = self._clock_ns()
+        if buy_started_ns < sell_completed_ns:
+            raise RuntimeError("clock_ns must be monotonic")
+        buy = simulate_buy_fak(
+            new_asks,
+            maker_quote,
+            Decimal("0.90"),
+            market.tick_size,
+            market.min_order_shares,
+            market.fee_schedule,
+        )
+        lots = self._inventory_lots(market, old_side, new_side, residual, buy.filled_shares)
+        if residual > 0 and buy.status != "full":
+            outcome = "PARTIAL_SELL_AND_BUY"
+        elif residual > 0:
+            outcome = "PARTIAL_SELL"
+        elif buy.status != "full":
+            outcome = "PARTIAL_BUY"
+        else:
+            outcome = "FULL"
+        result = ReverseSequence(
+            lane=lane,
+            market_id=market.market_id,
+            mkt_ts=market.mkt_ts,
+            config_hash=entry.config_hash,
+            old_side=old_side,
+            new_side=new_side,
+            status="COMPLETE",
+            outcome=outcome,
+            transitions=(
+                "ELIGIBLE",
+                "SELL_ATTEMPTED",
+                "SELL_FILLED_OR_PARTIAL",
+                "BUY_ATTEMPTED",
+                "COMPLETE",
+            ),
+            requested_shares=entry.fak.filled_shares,
+            sold_shares=sold,
+            old_residual_shares=residual,
+            submission_dust_shares=max(Decimal("0"), dust),
+            opposite_shares=buy.filled_shares,
+            expected_quote=expected,
+            sell=sell,
+            buy=buy,
+            inventory_lots=lots,
+            sell_book_generation=old_book.generation,
+            buy_book_generation=new_book.generation,
+            trigger_ts_ms=event_ts_ms,
+            leg_elapsed_ms=(buy_started_ns - sell_completed_ns) // 1_000_000,
+        )
+        self._reverse_attempted.add(lane)
+        return result
+
+    def _bind_market(self, market: MarketDefinition) -> None:
+        market_key = (market.market_id, market.mkt_ts)
+        if self._market_key is None:
+            self._market_key = market_key
+        elif self._market_key != market_key:
+            raise ValueError("MarketStrategyState cannot be reused across markets")
+
+    def _validate_reverse_identity(
+        self, lane: LaneKey, entry: StrategyEvent, market: MarketDefinition
+    ) -> None:
+        expected_token = market.up_token_id if entry.side == "UP" else market.down_token_id
+        if lane != entry.lane:
+            raise ValueError("reverse lane does not match entry lane")
+        if lane.threshold not in self.thresholds:
+            raise ValueError("reverse lane threshold is not configured")
+        if entry.kind != "entry_attempt":
+            raise ValueError("reverse requires an entry attempt")
+        if (entry.market_id, entry.mkt_ts) != (market.market_id, market.mkt_ts):
+            raise ValueError("reverse entry market mismatch")
+        if entry.side not in {"UP", "DOWN"} or entry.token_id != expected_token:
+            raise ValueError("reverse entry token mismatch")
+        if entry.config_hash != self.config_hash:
+            raise ValueError("reverse entry config mismatch")
+
+    @staticmethod
+    def _inventory_lots(
+        market: MarketDefinition,
+        old_side: str,
+        new_side: str,
+        old_residual: Decimal,
+        opposite_shares: Decimal,
+    ) -> tuple[InventoryLot, ...]:
+        lots: list[InventoryLot] = []
+        if old_residual > 0:
+            old_token = market.up_token_id if old_side == "UP" else market.down_token_id
+            lots.append(InventoryLot(old_token, old_side, old_residual, "reverse_old_residual"))
+        if opposite_shares > 0:
+            new_token = market.up_token_id if new_side == "UP" else market.down_token_id
+            lots.append(InventoryLot(new_token, new_side, opposite_shares, "reverse_buy"))
+        return tuple(lots)
+
+    # Friendly alias for callers that model the event as a position event.
+    on_position_event = on_reverse_event
 
 
 __all__ = [
