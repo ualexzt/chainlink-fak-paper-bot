@@ -190,7 +190,7 @@ Rules:
 - Requested amount: `PAPER_NOTIONAL_USD`, default `$5.00`.
 - Order type: FAK.
 - `max_price`: the lane threshold.
-- Position size is the actual partial-fill result, not requested notional divided by a headline price.
+- The signed BUY target is derived from `makerAmount / max_price` with the official tick-dependent SDK precision; position size is the actual fill of that target.
 
 `PAPER_NOTIONAL_USD` is configurable at startup, defaulting to `$5.00`. Changing it creates a new experiment version so results with different notionals are never mixed. Reports include both actual-dollar results and normalized PnL/EV per filled share.
 
@@ -200,47 +200,67 @@ The simulator follows the official Polymarket market-order semantics documented 
 
 - <https://docs.polymarket.com/trading/place-orders>
 - <https://docs.polymarket.com/api-reference/trade/post-a-new-order>
+- <https://docs.polymarket.com/concepts/order-lifecycle>
+- <https://github.com/Polymarket/clob-client/blob/main/src/order-builder/helpers.ts>
 
-### 7.1 Numeric rules
+### 7.1 Order construction and numeric rules
 
-- Use `Decimal` for all prices, sizes, quote amounts, fees, and PnL.
-- Prices must align to the market tick.
-- Quote and share atomic amounts use six-decimal precision with SDK-equivalent round-down behavior.
-- Market minimum size is checked before attempting execution.
-- No binary floating-point values enter accounting or persisted fill evidence.
+Use `Decimal` for all prices, sizes, quote amounts, fees, and PnL. Binary floating point never enters order construction, accounting, or persisted fill evidence.
+
+The simulator reproduces the official market-order rounding table:
+
+| Tick size | Price decimals | Direct size/amount decimals | Calculated counter-amount decimals |
+| --- | ---: | ---: | ---: |
+| `0.1` | 1 | 2 | 3 |
+| `0.01` | 2 | 2 | 4 |
+| `0.001` | 3 | 2 | 5 |
+| `0.0001` | 4 | 2 | 6 |
+
+- Prices must already align to the market tick; misaligned prices fail closed rather than being silently changed.
+- The direct market-order amount is rounded down to two decimals.
+- The calculated counter-amount follows the official SDK sequence: divide or multiply by the normalized price, round up to four guard decimals beyond the configured counter-amount precision, then round down to the configured counter-amount precision.
+- Signed `makerAmount` and `takerAmount`, caller-requested amounts, fill legs, fees, and residuals are persisted as canonical six-decimal `Decimal` values.
+- The market minimum share size is checked against the SDK-rounded submitted share amount before execution.
 
 ### 7.2 BUY FAK
 
-BUY amount is USDC notional.
+BUY input amount is USDC notional and `max_price` is the signed order's worst-price limit.
 
-1. Sort asks from lowest to highest.
-2. Ignore levels above `max_price`.
-3. At each eligible level, fill:
+1. Validate and sort asks from lowest to highest; ignore execution levels above `max_price`.
+2. Round the requested USDC down to the two-decimal direct amount to obtain submitted `makerAmount`.
+3. Derive submitted target shares (`takerAmount`) from `makerAmount / max_price` with the tick-dependent calculated precision.
+4. Reject the order before execution when submitted target shares are below the market minimum.
+5. Walk eligible asks at their actual resting prices and fill:
 
 ```text
-fill_shares = min(level_shares, remaining_usdc / level_price)
+fill_shares = min(level_shares, remaining_target_shares)
 fill_quote = fill_shares * level_price
 ```
 
-4. Quantize according to market/SDK precision.
-5. Stop when requested quote is consumed or eligible liquidity ends.
-6. Cancel unfilled requested USDC.
+6. Stop when submitted target shares are filled or eligible liquidity ends. FAK cancels the remaining submitted target and every unspent part of the requested quote.
 
-Persist every level fill, total quote spent, total shares, VWAP, unfilled quote, and full/partial/zero-fill status.
+Price improvement always benefits the taker: an ask below `max_price` reduces actual USDC spent; it never increases shares beyond the signed `takerAmount`. For tick `0.01`, a `$5.00` BUY with `max_price=0.90` submits `5.5555` target shares. Against `0.89×3` and `0.90×5`, it fills `5.555500` shares for `$4.969950`, leaving `$0.030050` unspent.
+
+Persist caller-requested quote, submitted maker/taker amounts, every actual-price fill leg, total quote spent, total shares, unfilled quote, and full/partial/zero-fill status.
 
 ### 7.3 SELL FAK
 
-SELL amount is shares.
+SELL input amount is shares and `min_price` is the signed order's worst-price floor.
 
-1. Sort bids from highest to lowest.
-2. The reverse emergency floor is the market minimum tick.
-3. At each eligible level, fill the lesser of remaining requested shares and level shares.
-4. Stop when all requested shares sell or eligible bid liquidity ends.
-5. Retain any unsold shares in the original inventory.
+1. Validate and sort bids from highest to lowest.
+2. Round requested shares down to the two-decimal direct amount to obtain submitted `makerAmount`.
+3. Derive the minimum submitted quote (`takerAmount`) from submitted shares times `min_price` with the tick-dependent calculated precision.
+4. Reject the order before execution when submitted shares are below the market minimum.
+5. Walk eligible bids down to `min_price`, filling at actual resting prices until submitted shares are filled or liquidity ends.
+6. Retain FAK-unfilled shares and any caller-request dust excluded by two-decimal submission in the original inventory.
 
-Persist every level fill, shares sold, quote received, VWAP, unsold shares, and full/partial/zero-fill status.
+Persist caller-requested shares, submitted maker/taker amounts, every actual-price fill leg, shares sold, quote received, and exact unsold shares.
 
-### 7.4 Fees
+### 7.4 Fill status and price improvement
+
+`full`, `partial`, and `zero` are derived from the submitted executable share target: BUY compares actual shares with submitted `takerAmount`; SELL compares actual shares with submitted `makerAmount`. A fully filled BUY can still have unspent quote because execution below `max_price` is price improvement, not a partial fill.
+
+### 7.5 Fees
 
 Fees use the market's validated Gamma fee schedule and apply only to actual filled quantities at actual level prices. The implementation must not hard-code the previously observed rate/exponent.
 
@@ -277,14 +297,14 @@ If the book enters the range first and Chainlink confirms later while the book r
 
 ### 8.4 Non-atomic execution sequence
 
-1. Submit/simulate an emergency SELL FAK for all held old-side shares down to the minimum tick.
+1. Submit/simulate an emergency SELL FAK for held old-side shares down to the minimum tick; official two-decimal direct-size rounding can leave inventory dust outside the submitted order.
 2. Let `sold_shares` be the actual SELL fill.
-3. Target exactly `sold_shares` of the opposite token.
-4. Walk opposite asks up to `max_price=0.90` to calculate the USDC required for that target from the current book.
-5. Submit/simulate a BUY FAK for that quote amount.
-6. Partial opposite fill is allowed; unfilled quote is canceled.
+3. Set opposite `max_price=0.90` and calculate the largest two-decimal BUY `makerAmount` whose SDK-derived `takerAmount` does not exceed `sold_shares`.
+4. Optionally walk current opposite asks with `quote_for_target_shares` to record expected actual spend and liquidity, but never use expected spend as the signed BUY `makerAmount`.
+5. Submit/simulate the BUY FAK with the calculated maker amount. Price improvement reduces actual spend without increasing the submitted opposite-share target.
+6. Partial opposite fill is allowed; unfilled quote and any non-representable share dust remain explicit.
 
-The reverse BUY never targets more shares than were actually sold. Any unsold old-side shares and any acquired opposite shares remain separate inventory lots through settlement.
+The reverse BUY's SDK-rounded target never exceeds shares actually sold. Any old-side residual, submission dust, and acquired opposite shares remain separate inventory lots through settlement.
 
 The two FAKs are explicitly non-atomic. Paper records include trigger time, SELL book generation, BUY book generation, and elapsed wall time between legs. The dashboard and reports must not label the sequence as guaranteed execution.
 
@@ -304,8 +324,8 @@ net_pnl = payouts
 
 Report:
 
-- requested and filled notional;
-- partial-fill rates;
+- caller-requested, SDK-submitted maker/taker, and actually filled amounts;
+- price-improvement savings, submission-rounding dust, and partial-fill rates;
 - initial side and final inventories;
 - hold counterfactual;
 - reverse incremental effect;
@@ -413,7 +433,7 @@ The dashboard is read-only and can be opened or closed without changing engine b
 ### 13.1 Unit tests
 
 - BUY and SELL FAK full, partial, and zero fills across multiple levels.
-- Tick, minimum-size, six-decimal rounding, and fee calculations.
+- Tick-dependent SDK maker/taker rounding, minimum-size checks on submitted shares, price improvement, six-decimal persistence, and fee calculations.
 - Rising crossing, gaps, stale generations, simultaneous sides, and one-attempt rules.
 - Chainlink freshness, first-start capture, direction, tie, and momentum filters.
 - Immediate and confirmed reverse state machines.
@@ -503,7 +523,9 @@ Live trading, wallet integration, authenticated User WebSocket, and real executi
 ## 16. Official References
 
 - Place Orders and market-order/FAK semantics: <https://docs.polymarket.com/trading/place-orders>
+- Order lifecycle and taker price improvement: <https://docs.polymarket.com/concepts/order-lifecycle>
 - Post New Order API response semantics: <https://docs.polymarket.com/api-reference/trade/post-a-new-order>
+- Official TypeScript order rounding helpers: <https://github.com/Polymarket/clob-client/blob/main/src/order-builder/helpers.ts>
 - Market WebSocket channel: <https://docs.polymarket.com/market-data/websocket/market-channel>
 - Chainlink TWAP through RTDS: <https://docs.polymarket.com/market-data/chainlink-twap>
 - Official Python CLOB client reference: <https://github.com/Polymarket/py-clob-client>

@@ -212,15 +212,16 @@ git commit -m "chore(paper): establish paper-only safety boundary"
 
 Cover these exact cases:
 
-- BUY `$5` across asks `0.89×3` and `0.90×5` with `max_price=0.90` fills 5.588888 shares after six-decimal floor and records two legs.
-- BUY ignores asks above max price and cancels remaining quote.
+- At tick `0.01`, BUY `$5.00` with `max_price=0.90` submits maker `$5.00` and taker `5.5555` shares. Across asks `0.89×3` and `0.90×5`, it fills `5.555500` shares in two legs, spends `$4.969950`, leaves `$0.030050` unspent, and reports `full`.
+- BUY price improvement reduces actual quote spent and never increases fills beyond submitted taker shares.
+- BUY ignores asks above max price and cancels unfilled target/quote.
 - BUY with no eligible ask returns zero fill.
-- SELL walks bids highest to lowest down to minimum tick.
-- SELL partial fill retains exact unsold shares.
-- Requested size below market minimum is rejected before book walking.
-- Prices not aligned to tick are rejected.
-- Every persisted amount has at most six decimal places.
-- Fee is calculated per actual level fill from the supplied schedule, never from VWAP.
+- The official rounding table is exact for ticks `0.1`, `0.01`, `0.001`, and `0.0001`: direct amount precision is two decimals and calculated counter-amount precision is tick decimals plus two.
+- A BUY of `$0.89` at `max_price=0.90` submits `0.9888` shares and is rejected before book walking when minimum size is one share.
+- SELL rounds submitted shares down to two decimals, walks bids highest to lowest down to minimum price, and retains both submission dust and FAK-unfilled shares.
+- Prices not aligned to tick are rejected rather than silently normalized.
+- Caller request, submitted maker/taker amounts, fill legs, fees, and residuals persist with at most six decimal places.
+- Fee is calculated per actual level fill from the supplied schedule, never from max/min price or VWAP.
 
 Use concrete expected `Decimal` values and assert `sum(leg.shares) == result.filled_shares` and `sum(leg.quote) == result.quote_amount`.
 
@@ -260,6 +261,8 @@ class FillLeg:
 class FakResult:
     requested_quote: Decimal | None
     requested_shares: Decimal | None
+    submitted_maker_amount: Decimal
+    submitted_taker_amount: Decimal
     filled_shares: Decimal
     quote_amount: Decimal
     unfilled_quote: Decimal | None
@@ -275,9 +278,12 @@ The public functions must expose these exact contracts:
 simulate_buy_fak(asks, requested_usdc, max_price, tick_size, min_order_shares, fee_schedule) -> FakResult
 simulate_sell_fak(bids, requested_shares, min_price, tick_size, min_order_shares, fee_schedule) -> FakResult
 quote_for_target_shares(asks, target_shares, max_price) -> Decimal
+buy_maker_amount_for_target_shares(target_shares, max_price, tick_size) -> Decimal
 ```
 
-Implementation rules are exactly Design §7: sort levels, floor atomic amounts to six decimals, never mutate the input book, and derive `full`, `partial`, or `zero` from actual fill. `simulate_buy_fak` iterates ascending asks and decrements quote; `simulate_sell_fak` iterates descending bids and decrements shares; `quote_for_target_shares` returns only the quote consumed while accumulating at most the target shares.
+Implementation rules are exactly Design §7 and the official order-construction references. Centralize the supported tick rounding table. Reproduce direct-amount round-down and calculated counter-amount guard-round/up-then-down behavior with `Decimal`, then persist canonical six-decimal values. Never mutate the input book.
+
+`simulate_buy_fak` builds submitted maker/taker amounts first, checks minimum submitted shares, then walks ascending asks at actual prices until submitted taker shares are filled. Status is based on submitted taker shares, so a full price-improved BUY may retain unspent quote. `simulate_sell_fak` builds a two-decimal submitted maker-share amount, checks that amount against the minimum, and walks descending bids; caller-request dust remains unfilled. `quote_for_target_shares` reports expected actual book spend only. `buy_maker_amount_for_target_shares` returns the largest SDK-valid two-decimal maker quote whose derived BUY taker shares do not exceed the requested target.
 
 - [ ] **Step 4: Verify GREEN and cumulative safety**
 
@@ -567,12 +573,13 @@ Test the approved behavior:
 - Chainlink confirmation arriving while the book remains eligible triggers.
 - No reverse on the entry event.
 - SELL sweeps held shares to minimum tick and may partially fill.
-- Reverse BUY targets only actual `sold_shares` using `quote_for_target_shares` and max 0.90.
-- Partial BUY persists both old residual and actual opposite inventory.
+- Reverse BUY uses `buy_maker_amount_for_target_shares(sold_shares, 0.90, tick_size)`; its SDK-derived target never exceeds actual `sold_shares`.
+- `quote_for_target_shares` records expected actual spend/liquidity only and is not used as signed maker amount.
+- Partial BUY persists old residual, submission dust, unspent quote, and actual opposite inventory.
 - Exactly one reverse sequence is attempted; no second switch/DCA.
 - SELL/BUY book generations and elapsed leg time are recorded.
 
-Use a regression example where 5.555555 held shares, only 3.000000 sell, and only 2.500000 opposite shares buy. Assert no inventory becomes negative and reverse BUY target is 3.000000, not 5.555555.
+Use a regression example where `5.555555` held shares produce a two-decimal SELL submission, only `3.000000` shares actually sell, and only `2.500000` opposite shares buy. Assert no inventory becomes negative, SELL submission dust remains old-side inventory, and the SDK-derived reverse BUY target is at most `3.000000`, never `5.555555`.
 
 - [ ] **Step 2: Verify RED**
 
@@ -588,7 +595,7 @@ Add immutable `ReverseSequence` and `InventoryLot` domain records. The transitio
 ELIGIBLE -> SELL_ATTEMPTED -> SELL_FILLED_OR_PARTIAL -> BUY_ATTEMPTED -> COMPLETE
 ```
 
-Zero SELL fill ends the sequence without BUY. BUY request quote is computed from current opposite asks for `sold_shares`; actual partial fills are retained.
+Zero SELL fill ends the sequence without BUY. The BUY maker quote is derived from `sold_shares`, `max_price=0.90`, tick precision, and the official SDK maker/taker conversion. Current opposite asks provide expected-spend/liquidity telemetry; actual price-improved or partial fills are retained.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -1178,8 +1185,9 @@ Report the exact `./paper-watch` command and state that the seven-day forward ex
 - [ ] Full unit/replay suite passes locally and inside Docker.
 - [ ] Security scanner proves no credentials, authenticated user channel, or order POST path.
 - [ ] Decimal FAK fills reconcile level-by-level.
+- [ ] BUY/SELL submitted maker/taker amounts match the official tick-dependent order-construction rules.
 - [ ] 36 lanes per asset are pre-registered and immutable per experiment version.
-- [ ] Partial reverse sells buy only actually sold shares.
+- [ ] Partial reverse sells buy no more than actually sold shares.
 - [ ] SQLite restart/idempotency and raw journal replay pass.
 - [ ] Recorder backup is locally verified before remote deletion.
 - [ ] Only old recorder resources are removed; no broad prune occurs.
