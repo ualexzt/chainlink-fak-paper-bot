@@ -8,9 +8,13 @@ if docker info >/dev/null 2>&1; then
 else
   DOCKER=(sudo docker)
 fi
-REFRESH="${1:-1.0}"
-if (( $# > 0 )); then
+REFRESH="1.0"
+if (( $# > 0 )) && [[ "${1}" != -* ]]; then
+  REFRESH="$1"
   shift
+elif (( $# >= 2 )) && [[ "${1}" == "--refresh" ]]; then
+  REFRESH="$2"
+  shift 2
 fi
 
 exec "${DOCKER[@]}" compose -f "${COMPOSE_FILE}" exec paper-engine \
