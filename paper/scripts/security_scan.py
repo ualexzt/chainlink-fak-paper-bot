@@ -40,7 +40,8 @@ def iter_files(target: Path) -> Iterable[Path]:
             relative_parts = path.relative_to(target).parts[:-1]
         except ValueError:
             relative_parts = path.parts[:-1]
-        if path.resolve() == scanner or any(part in excluded_dirs for part in relative_parts):
+        if (path.resolve() == scanner or path.suffix.lower() in {".md", ".markdown"}
+                or any(part in excluded_dirs for part in relative_parts)):
             continue
         yield path
 
