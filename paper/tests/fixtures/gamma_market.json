@@ -1,0 +1,37 @@
+[
+  {
+    "id": "btc-updown-5m-1788250800",
+    "conditionId": "0xbtcupdown5m1788250800",
+    "slug": "btc-updown-5m-1788250800",
+    "question": "Will BTC move up or down over the next 5 minutes?",
+    "description": "Sanitized official-shaped Gamma market fixture for public discovery tests.",
+    "startDate": "2026-08-31T12:00:00Z",
+    "eventStartTime": "2026-09-01T08:20:00Z",
+    "endDate": "2026-09-01T08:25:00Z",
+    "enableOrderBook": true,
+    "active": true,
+    "closed": false,
+    "archived": false,
+    "acceptingOrders": true,
+    "orderMinSize": 5,
+    "orderPriceMinTickSize": 0.01,
+    "feesEnabled": true,
+    "feeSchedule": {
+      "exponent": 1,
+      "rate": 0.07,
+      "takerOnly": true,
+      "rebateRate": 0.2
+    },
+    "outcomes": "[\"Up\", \"Down\"]",
+    "clobTokenIds": "[\"11111111111111111111111111111111111111111111111111111111111111111111\", \"22222222222222222222222222222222222222222222222222222222222222222222\"]",
+    "resolutionSource": "https://data.chain.link/streams/btc-usd-twap-60s-streams",
+    "cryptoMarketConfigId": "btc-5m-twap-60",
+    "cryptoMarketConfig": {
+      "id": "btc-5m-twap-60",
+      "asset": "btc",
+      "duration": "5m",
+      "twapEnabled": true,
+      "twapLookbackSeconds": 60
+    }
+  }
+]
