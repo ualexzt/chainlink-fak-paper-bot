@@ -33,7 +33,15 @@ def iter_files(target: Path) -> Iterable[Path]:
     if target.is_file():
         yield target
         return
+    scanner = Path(__file__).resolve()
+    excluded_dirs = {".git", "__pycache__", "runtime", "tests"}
     for path in sorted(p for p in target.rglob("*") if p.is_file()):
+        try:
+            relative_parts = path.relative_to(target).parts[:-1]
+        except ValueError:
+            relative_parts = path.parts[:-1]
+        if path.resolve() == scanner or any(part in excluded_dirs for part in relative_parts):
+            continue
         yield path
 
 

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="${SCRIPT_DIR}/../docker-compose.yml"
+
+case "${1:-}" in
+  start)
+    mkdir -p "${SCRIPT_DIR}/../runtime"
+    exec docker compose -f "${COMPOSE_FILE}" up -d --build paper-engine
+    ;;
+  stop)
+    exec docker compose -f "${COMPOSE_FILE}" stop paper-engine
+    ;;
+  status)
+    exec docker compose -f "${COMPOSE_FILE}" ps paper-engine
+    ;;
+  logs)
+    exec docker compose -f "${COMPOSE_FILE}" logs --tail=200 -f paper-engine
+    ;;
+  *)
+    echo "usage: paper-bot {start|stop|status|logs}" >&2
+    exit 2
+    ;;
+esac

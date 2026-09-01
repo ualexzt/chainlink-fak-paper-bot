@@ -1,0 +1,31 @@
+services:
+  paper-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "paper_bot.cli", "engine"]
+    environment:
+      SYMBOLS: ${SYMBOLS:-btc,eth,sol}
+      ENTRY_THRESHOLDS: ${ENTRY_THRESHOLDS:-0.80,0.85,0.89,0.90}
+      PAPER_NOTIONAL_USD: ${PAPER_NOTIONAL_USD:-5.00}
+      RTDS_STALE_SEC: ${RTDS_STALE_SEC:-10}
+      DATA_DIR: /data
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - type: bind
+        source: ./runtime
+        target: /data
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/healthcheck.py", "--db", "/data/paper.db", "--max-age", "10"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

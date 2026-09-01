@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="${SCRIPT_DIR}/../docker-compose.yml"
+REFRESH="${1:-1.0}"
+if (( $# > 0 )); then
+  shift
+fi
+
+exec docker compose -f "${COMPOSE_FILE}" exec paper-engine \
+  python -m paper_bot.cli watch --db /data/paper.db --refresh "${REFRESH}" "$@"
