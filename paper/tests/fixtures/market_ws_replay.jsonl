@@ -1,0 +1,4 @@
+{"event_type":"book","market":"m1","asset_id":"up-token","timestamp":"1785178800000","bids":[{"price":"0.79","size":"10"}],"asks":[{"price":"0.80","size":"8"}]}
+{"event_type":"price_change","market":"m1","timestamp":"1785178800100","price_changes":[{"asset_id":"up-token","price":"0.80","size":"0","side":"SELL"},{"asset_id":"up-token","price":"0.81","size":"7.5","side":"SELL"}]}
+{"topic":"market","type":"book","payload":{"market":"m1","tokenId":"down-token","timestamp":"1785178800200","bids":[{"price":"0.18","size":"9"}],"asks":[{"price":"0.19","size":"6"}]}}
+{"topic":"market","type":"price_change","payload":{"market":"m1","timestamp":"1785178800300","priceChanges":[{"tokenId":"down-token","price":"0.18","size":"5","side":"BUY"}]}}

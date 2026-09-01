@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import unittest
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
+from pathlib import Path
 
 import paper_bot.resolver as resolver
 from paper_bot.resolver import ResolverState, ResolverView
+from paper_bot.rtds import RtdsClient, parse_e18, parse_rtds_message
+
+RTDS_FIXTURE = Path(__file__).parent / "fixtures" / "rtds_replay.jsonl"
 
 
 class ResolverConstructorTests(unittest.TestCase):
@@ -240,6 +246,134 @@ class ResolverViewTests(unittest.TestCase):
             with self.subTest(symbol=symbol, mkt_ts=mkt_ts, now_ms=now_ms):
                 with self.assertRaises((TypeError, ValueError)):
                     state.view(symbol, mkt_ts, now_ms)
+
+
+class RtdsParserTests(unittest.TestCase):
+    def test_signed_e18_parsing_is_exact_without_binary_float(self):
+        self.assertEqual(parse_e18("65000500000000000000000"), Decimal("65000.5"))
+        self.assertEqual(parse_e18("-1"), Decimal("-0.000000000000000001"))
+        self.assertEqual(parse_e18("0"), Decimal("0"))
+        for raw in (1, "+1", "01", "1.0", "NaN", ""):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                parse_e18(raw)
+
+    def test_fixture_accepts_only_twap60_and_handles_arrays_and_control(self):
+        lines = RTDS_FIXTURE.read_text().splitlines()
+        btc = parse_rtds_message(lines[0], receive_ts_ms=1785178800123)
+        self.assertEqual([(item.symbol, item.value, item.observation_ts_ms) for item in btc], [
+            ("btc", Decimal("65000.5"), 1785178800000)
+        ])
+        array = parse_rtds_message(lines[1], receive_ts_ms=1785178801123)
+        self.assertEqual([(item.symbol, item.value) for item in array], [
+            ("eth", Decimal("3420.15"))
+        ])
+        self.assertEqual(parse_rtds_message(lines[2], receive_ts_ms=1785178801123), ())
+
+    def test_display_value_wrong_window_symbol_future_and_stale_are_rejected(self):
+        base = {
+            "topic": "crypto_prices_twap_sixty", "type": "update",
+            "payload": {
+                "symbol": "btc/usd", "full_accuracy_value": "100000000000000000000",
+                "timestamp": 1_000_000, "window_s": 60,
+            },
+        }
+        cases = (
+            {**base, "topic": "crypto_prices_twap_thirty"},
+            {**base, "type": "snapshot"},
+            {**base, "payload": {**base["payload"], "window_s": 30}},
+            {**base, "payload": {**base["payload"], "symbol": "xrp/usd"}},
+            {**base, "payload": {**base["payload"], "timestamp": 1_000_001}},
+            {**base, "payload": {**base["payload"], "timestamp": 989_999}},
+            {**base, "payload": {**base["payload"], "full_accuracy_value": None, "value": 100.0}},
+        )
+        for frame in cases:
+            with self.subTest(frame=frame):
+                self.assertEqual(parse_rtds_message(frame, receive_ts_ms=1_000_000), ())
+
+
+class _RtdsSocket:
+    def __init__(self, incoming=(), *, interactive=False, respond_pong=True):
+        self.incoming = tuple(incoming)
+        self.interactive = interactive
+        self.respond_pong = respond_pong
+        self.queue = asyncio.Queue()
+        self.sent = []
+        self.closed = False
+
+    async def send(self, value):
+        self.sent.append(value)
+        if self.interactive and self.respond_pong and value == "PING":
+            await self.queue.put("PONG")
+
+    def __aiter__(self):
+        return self if self.interactive else self._iterate()
+
+    async def _iterate(self):
+        for value in self.incoming:
+            await asyncio.sleep(0)
+            yield value
+
+    async def __anext__(self):
+        return await self.queue.get()
+
+    async def close(self):
+        self.closed = True
+
+
+class RtdsClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_consumer_is_monotonic_and_only_twap_refreshes_watchdog(self):
+        valid = RTDS_FIXTURE.read_text().splitlines()[0]
+        duplicate = json.loads(valid)
+        frames = ("PONG", '{"topic":"other","type":"update","payload":{}}', valid, duplicate)
+        websocket = _RtdsSocket(frames)
+        queue = asyncio.Queue()
+        refreshed = {"btc": 1, "eth": 1, "sol": 1}
+        times = iter((1785178800123, 1785178800123, 1785178800123, 1785178800124))
+        client = RtdsClient(lambda _url: None, clock_ms=lambda: next(times))
+        with self.assertRaisesRegex(ConnectionError, "closed"):
+            await client._consume(websocket, queue, refreshed, asyncio.Event())
+        self.assertEqual(queue.qsize(), 1)
+        self.assertEqual(refreshed, {"btc": 1785178800123, "eth": 1, "sol": 1})
+
+    async def test_connection_uses_exact_public_frame_ping_and_twap_watchdog(self):
+        websocket = _RtdsSocket(interactive=True)
+        now = [1000]
+
+        async def connector(url):
+            self.assertEqual(url, "wss://ws-live-data.polymarket.com")
+            return websocket
+
+        async def advance(_delay):
+            now[0] += 5000
+            await asyncio.sleep(0)
+
+        client = RtdsClient(
+            connector, ping_interval=5, stale_after_ms=10_000,
+            clock_ms=lambda: now[0], sleep=advance,
+        )
+        with self.assertRaisesRegex(ConnectionError, "watchdog"):
+            await client._connection(asyncio.Queue())
+        self.assertEqual(json.loads(websocket.sent[0]), {
+            "action": "subscribe",
+            "subscriptions": [{"topic": "crypto_prices_twap_sixty", "type": "update"}],
+        })
+        self.assertEqual(websocket.sent[1:], ["PING", "PING", "PING"])
+        self.assertTrue(websocket.closed)
+
+    async def test_missing_pong_reconnects_without_refreshing_twap_watchdog(self):
+        websocket = _RtdsSocket(interactive=True, respond_pong=False)
+
+        async def connector(_url):
+            return websocket
+
+        client = RtdsClient(
+            connector, ping_interval=0.001, stale_after_ms=10_000,
+            clock_ms=lambda: 1000,
+        )
+        with self.assertRaisesRegex(ConnectionError, "PONG timeout"):
+            await client._connection(asyncio.Queue())
+        self.assertEqual(websocket.sent[1:], ["PING"])
+        self.assertTrue(websocket.closed)
 
 
 if __name__ == "__main__":
