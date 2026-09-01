@@ -29,6 +29,9 @@ class MarketDelta:
     event_ts_ms: int
     sequence: int
     payload: Mapping[str, Any]
+    batch_index: int = 0
+    batch_size: int = 1
+    batch_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,7 @@ def parse_market_message(
         if not isinstance(changes, list):
             return ()
         events: list[MarketDelta] = []
+        batch_size = len(changes)
         for index, change in enumerate(changes):
             if not isinstance(change, Mapping):
                 raise ValueError
@@ -132,6 +136,9 @@ def parse_market_message(
                 event_ts_ms=event_ts_ms,
                 sequence=sequence + index,
                 payload=dict(message),
+                batch_index=index,
+                batch_size=batch_size,
+                batch_id=sequence,
             ))
         return tuple(events)
     except (KeyError, TypeError, ValueError):

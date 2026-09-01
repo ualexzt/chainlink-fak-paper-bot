@@ -12,7 +12,7 @@ from typing import Any
 
 from .accounting import LaneResult
 from .config import Settings
-from .domain import FakResult, InventoryLot, ReverseSequence
+from .domain import FakResult, FillLeg, InventoryLot, ReverseSequence
 from .settlement import OfficialSettlement
 from .strategy import Confirmation, LaneKey, PositionPolicy, StrategyEvent
 
@@ -37,6 +37,8 @@ class PersistedPosition:
     initial_side: str
     inventory_lots: tuple[InventoryLot, ...]
     reverse_attempted: bool
+    entry: StrategyEvent
+    reverse: ReverseSequence | None
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,7 @@ class PersistedMarketState:
     close_ts: int
     attempted_lane_keys: tuple[LaneKey, ...]
     open_positions: tuple[PersistedPosition, ...]
+    lane_records: tuple[PersistedPosition, ...]
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,152 @@ def _sqlite_decimal_nonnegative(raw: Any) -> int:
         return 0
 
 
+def _stored_mapping(raw: Any, name: str) -> Mapping[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise StorageInvariantError(f"stored {name} must be a mapping")
+    return raw
+
+
+def _stored_string(raw: Any, name: str) -> str:
+    if not isinstance(raw, str) or not raw:
+        raise StorageInvariantError(f"stored {name} must be nonempty")
+    return raw
+
+
+def _stored_int(raw: Any, name: str, *, optional: bool = False) -> int | None:
+    if optional and raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise StorageInvariantError(f"stored {name} must be a nonnegative integer")
+    return raw
+
+
+def _stored_decimal(raw: Any, name: str, *, optional: bool = False) -> Decimal | None:
+    if optional and raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise StorageInvariantError(f"stored {name} must be a canonical Decimal string")
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise StorageInvariantError(f"stored {name} is not Decimal") from exc
+    if not value.is_finite() or canonical_decimal(value) != raw:
+        raise StorageInvariantError(f"stored {name} is not canonical")
+    return value
+
+
+def _stored_lane(raw: Any) -> LaneKey:
+    lane = _stored_mapping(raw, "lane")
+    try:
+        return LaneKey(
+            _stored_decimal(lane.get("threshold"), "lane threshold"),
+            Confirmation(_stored_string(lane.get("confirmation"), "lane confirmation")),
+            PositionPolicy(_stored_string(lane.get("policy"), "lane policy")),
+        )
+    except ValueError as exc:
+        raise StorageInvariantError("stored lane enum is invalid") from exc
+
+
+def _stored_fak(raw: Any) -> FakResult:
+    value = _stored_mapping(raw, "FAK")
+    raw_legs = value.get("legs")
+    if not isinstance(raw_legs, list):
+        raise StorageInvariantError("stored FAK legs must be a list")
+    legs: list[FillLeg] = []
+    for raw_leg in raw_legs:
+        leg = _stored_mapping(raw_leg, "fill leg")
+        legs.append(FillLeg(
+            _stored_decimal(leg.get("price"), "leg price"),
+            _stored_decimal(leg.get("shares"), "leg shares"),
+            _stored_decimal(leg.get("quote"), "leg quote"),
+            _stored_decimal(leg.get("fee"), "leg fee"),
+        ))
+    return FakResult(
+        requested_quote=_stored_decimal(value.get("requested_quote"), "requested quote", optional=True),
+        requested_shares=_stored_decimal(value.get("requested_shares"), "requested shares", optional=True),
+        submitted_maker_amount=_stored_decimal(value.get("submitted_maker_amount"), "maker amount"),
+        submitted_taker_amount=_stored_decimal(value.get("submitted_taker_amount"), "taker amount"),
+        filled_shares=_stored_decimal(value.get("filled_shares"), "filled shares"),
+        quote_amount=_stored_decimal(value.get("quote_amount"), "quote amount"),
+        unfilled_quote=_stored_decimal(value.get("unfilled_quote"), "unfilled quote", optional=True),
+        unfilled_shares=_stored_decimal(value.get("unfilled_shares"), "unfilled shares", optional=True),
+        fee=_stored_decimal(value.get("fee"), "FAK fee"),
+        legs=tuple(legs),
+        status=_stored_string(value.get("status"), "FAK status"),
+    )
+
+
+def _stored_inventory(raw: Any) -> tuple[InventoryLot, ...]:
+    if not isinstance(raw, list):
+        raise StorageInvariantError("stored inventory must be a list")
+    result: list[InventoryLot] = []
+    for item in raw:
+        lot = _stored_mapping(item, "inventory lot")
+        result.append(InventoryLot(
+            _stored_string(lot.get("token_id"), "lot token"),
+            _stored_string(lot.get("side"), "lot side"),
+            _stored_decimal(lot.get("shares"), "lot shares"),
+            _stored_string(lot.get("source"), "lot source"),
+        ))
+    return tuple(result)
+
+
+def _stored_entry(raw_json: str) -> StrategyEvent:
+    try:
+        raw = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise StorageInvariantError("stored entry JSON is invalid") from exc
+    value = _stored_mapping(raw, "entry")
+    event = StrategyEvent(
+        lane=_stored_lane(value.get("lane")),
+        kind=_stored_string(value.get("kind"), "entry kind"),
+        market_id=_stored_string(value.get("market_id"), "entry market"),
+        mkt_ts=_stored_int(value.get("mkt_ts"), "entry market timestamp"),
+        token_id=_stored_string(value.get("token_id"), "entry token"),
+        side=_stored_string(value.get("side"), "entry side"),
+        event_ts_ms=_stored_int(value.get("event_ts_ms"), "entry event timestamp"),
+        book_generation=_stored_int(value.get("book_generation"), "entry generation"),
+        config_hash=_stored_string(value.get("config_hash"), "entry config"),
+        fak=_stored_fak(value.get("fak")),
+    )
+    Storage._validate_fak(event.fak)
+    return event
+
+
+def _stored_reverse(raw_json: str) -> ReverseSequence:
+    try:
+        raw = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise StorageInvariantError("stored reverse JSON is invalid") from exc
+    value = _stored_mapping(raw, "reverse")
+    transitions = value.get("transitions")
+    if not isinstance(transitions, list) or any(not isinstance(item, str) for item in transitions):
+        raise StorageInvariantError("stored reverse transitions are invalid")
+    buy_raw = value.get("buy")
+    return ReverseSequence(
+        lane=_stored_lane(value.get("lane")),
+        market_id=_stored_string(value.get("market_id"), "reverse market"),
+        mkt_ts=_stored_int(value.get("mkt_ts"), "reverse market timestamp"),
+        config_hash=_stored_string(value.get("config_hash"), "reverse config"),
+        old_side=_stored_string(value.get("old_side"), "reverse old side"),
+        new_side=_stored_string(value.get("new_side"), "reverse new side"),
+        status=_stored_string(value.get("status"), "reverse status"),
+        outcome=_stored_string(value.get("outcome"), "reverse outcome"),
+        transitions=tuple(transitions),
+        requested_shares=_stored_decimal(value.get("requested_shares"), "reverse requested shares"),
+        sold_shares=_stored_decimal(value.get("sold_shares"), "reverse sold shares"),
+        old_residual_shares=_stored_decimal(value.get("old_residual_shares"), "reverse residual"),
+        submission_dust_shares=_stored_decimal(value.get("submission_dust_shares"), "reverse dust"),
+        opposite_shares=_stored_decimal(value.get("opposite_shares"), "reverse opposite shares"),
+        expected_quote=_stored_decimal(value.get("expected_quote"), "reverse expected quote"),
+        sell=_stored_fak(value.get("sell")),
+        buy=None if buy_raw is None else _stored_fak(buy_raw),
+        inventory_lots=_stored_inventory(value.get("inventory_lots")),
+        sell_book_generation=_stored_int(value.get("sell_book_generation"), "reverse sell generation"),
+        buy_book_generation=_stored_int(value.get("buy_book_generation"), "reverse buy generation", optional=True),
+        trigger_ts_ms=_stored_int(value.get("trigger_ts_ms"), "reverse trigger timestamp"),
+        leg_elapsed_ms=_stored_int(value.get("leg_elapsed_ms"), "reverse elapsed", optional=True),
+    )
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS experiment_versions(
     experiment_hash TEXT PRIMARY KEY CHECK(length(experiment_hash)=64),
@@ -575,7 +724,7 @@ class Storage:
         for market in rows:
             args = (market["experiment_hash"], market["market_id"])
             signals = db.execute(
-                """SELECT threshold,confirmation,policy,side FROM signals
+                """SELECT threshold,confirmation,policy,side,payload_json FROM signals
                    WHERE experiment_hash=? AND market_id=? AND phase='ENTRY'
                    ORDER BY threshold,confirmation,policy""", args,
             ).fetchall()
@@ -584,9 +733,17 @@ class Storage:
                 for row in signals
             )
             positions: list[PersistedPosition] = []
+            lane_records: list[PersistedPosition] = []
             for row in signals:
                 lane = LaneKey(Decimal(row["threshold"]), Confirmation(row["confirmation"]), PositionPolicy(row["policy"]))
                 lane_args = args + self._lane_columns(lane)
+                entry = _stored_entry(row["payload_json"])
+                reverse_row = db.execute(
+                    """SELECT payload_json FROM signals WHERE experiment_hash=? AND market_id=?
+                       AND threshold=? AND confirmation=? AND policy=? AND phase='REVERSE'""",
+                    lane_args,
+                ).fetchone()
+                reverse = None if reverse_row is None else _stored_reverse(reverse_row["payload_json"])
                 lot_rows = db.execute(
                     """SELECT token_id,side,shares,source FROM inventory_lots WHERE experiment_hash=?
                        AND market_id=? AND threshold=? AND confirmation=? AND policy=? AND open=1
@@ -596,18 +753,17 @@ class Storage:
                     InventoryLot(item["token_id"], item["side"], Decimal(item["shares"]), item["source"])
                     for item in lot_rows
                 )
+                record = PersistedPosition(
+                    lane, market["experiment_hash"], row["side"], lots,
+                    reverse is not None, entry, reverse,
+                )
+                lane_records.append(record)
                 if lots:
-                    reverse_attempted = db.execute(
-                        """SELECT 1 FROM signals WHERE experiment_hash=? AND market_id=? AND threshold=?
-                           AND confirmation=? AND policy=? AND phase='REVERSE'""", lane_args,
-                    ).fetchone() is not None
-                    positions.append(
-                        PersistedPosition(lane, market["experiment_hash"], row["side"], lots, reverse_attempted)
-                    )
+                    positions.append(record)
             states.append(
                 PersistedMarketState(
                     market["experiment_hash"], market["market_id"], market["mkt_ts"], market["close_ts"],
-                    attempted, tuple(positions),
+                    attempted, tuple(positions), tuple(lane_records),
                 )
             )
         return tuple(states)

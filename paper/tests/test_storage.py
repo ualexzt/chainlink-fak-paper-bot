@@ -161,6 +161,7 @@ class StorageTests(unittest.TestCase):
         states = self.storage.load_open_market_states()
         self.assertEqual(len(states), 1)
         self.assertEqual(states[0].attempted_lane_keys, (self.lane, zero_lane))
+        self.assertEqual(tuple(record.entry for record in states[0].lane_records), (self.entry, zero))
         self.assertEqual(len(states[0].open_positions), 1)
         self.assertEqual(states[0].open_positions[0].inventory_lots[0].shares, D("5"))
         self.storage.record_strategy_events((self.entry, zero))
@@ -179,6 +180,8 @@ class StorageTests(unittest.TestCase):
         state = self.storage.load_open_market_states()[0]
         position = state.open_positions[0]
         self.assertTrue(position.reverse_attempted)
+        self.assertEqual(position.entry, self.entry)
+        self.assertEqual(position.reverse, reverse)
         self.assertEqual({(lot.side, lot.shares) for lot in position.inventory_lots},
                          {("UP", D("2")), ("DOWN", D("2"))})
 

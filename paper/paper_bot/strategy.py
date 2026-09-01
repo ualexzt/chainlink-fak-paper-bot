@@ -133,6 +133,23 @@ class MarketStrategyState:
         self._market_key: tuple[str, int] | None = None
         self._reverse_attempted: set[LaneKey] = set()
 
+    def restore_attempts(
+        self,
+        attempted_lanes: Sequence[LaneKey],
+        reverse_attempted_lanes: Sequence[LaneKey] = (),
+    ) -> None:
+        """Hydrate durable one-shot guards before any fresh market event."""
+        if self._market_key is not None or self._previous or self._attempted or self._reverse_attempted:
+            raise RuntimeError("strategy attempts can only be restored into fresh state")
+        attempted = tuple(attempted_lanes)
+        reversed_lanes = tuple(reverse_attempted_lanes)
+        if any(not isinstance(lane, LaneKey) or lane.threshold not in self.thresholds for lane in attempted):
+            raise ValueError("invalid restored entry lane")
+        if any(not isinstance(lane, LaneKey) or lane not in attempted for lane in reversed_lanes):
+            raise ValueError("invalid restored reverse lane")
+        self._attempted.update((lane.threshold, lane.confirmation) for lane in attempted)
+        self._reverse_attempted.update(reversed_lanes)
+
     def on_book_event(
         self,
         market: MarketDefinition,
