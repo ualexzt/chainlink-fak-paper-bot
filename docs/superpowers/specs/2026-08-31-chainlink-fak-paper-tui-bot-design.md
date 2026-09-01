@@ -74,14 +74,14 @@ Expected operator commands:
 Discover current and next markets for each configured symbol. A market is accepted only when all of the following validate:
 
 - slug exactly matches `{symbol}-updown-5m-{mkt_ts}`;
-- start/end timestamps define a 300-second interval;
+- `eventStartTime` equals `mkt_ts` and `endDate` equals `mkt_ts + 300`; the top-level Gamma `startDate` is listing metadata and is not the 5-minute interval boundary;
 - outcomes contain one Up and one Down token;
 - both token IDs are present and distinct;
 - order book is enabled;
 - tick size and minimum order size are valid;
 - fee schedule is present when fees are enabled;
-- `secondsDelay` is zero; delayed matching is unsupported in this paper phase and such a market is skipped;
-- resolution source identifies the applicable Chainlink TWAP stream.
+- `secondsDelay` is either omitted or numerically zero; delayed matching is unsupported in this paper phase and a non-zero value skips the market;
+- `resolutionSource` exactly identifies the symbol-specific `data.chain.link` TWAP-60 stream; when present, Gamma crypto-market configuration must corroborate the symbol, 5-minute duration, and TWAP enablement.
 
 The engine must fail closed for a market when validation fails.
 
@@ -522,6 +522,7 @@ Live trading, wallet integration, authenticated User WebSocket, and real executi
 
 ## 16. Official References
 
+- Gamma market response schema: <https://docs.polymarket.com/api-reference/markets/list-markets>
 - Place Orders and market-order/FAK semantics: <https://docs.polymarket.com/trading/place-orders>
 - Order lifecycle and taker price improvement: <https://docs.polymarket.com/concepts/order-lifecycle>
 - Post New Order API response semantics: <https://docs.polymarket.com/api-reference/trade/post-a-new-order>

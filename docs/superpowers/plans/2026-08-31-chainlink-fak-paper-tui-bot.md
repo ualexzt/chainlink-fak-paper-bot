@@ -361,20 +361,20 @@ git commit -m "feat(paper): maintain generation-safe full books"
 
 - [ ] **Step 1: Write failing validation tests**
 
-Use a complete sanitized Gamma fixture. Tests reject:
+Use a complete sanitized fixture shaped like the official Gamma `GET /markets?slug=...` response. Its `eventStartTime` is the interval start; top-level `startDate` is listing metadata and must not be treated as the 5-minute boundary. Tests reject:
 
 - wrong slug/symbol/timestamp;
-- interval other than 300 seconds;
+- an `eventStartTime`/`endDate` interval other than 300 seconds;
 - missing/distinct-token violations;
 - wrong outcomes;
 - disabled order book;
 - invalid tick/minimum size;
 - missing enabled fee schedule;
-- non-Chainlink resolution source;
-- non-zero `secondsDelay`;
+- a resolution source other than the exact symbol-specific `data.chain.link` TWAP-60 stream, or contradictory crypto-market configuration when present;
+- numerically non-zero `secondsDelay`; omission and numeric zero both mean no configured delay and are accepted;
 - current/next responses that do not match requested slugs.
 
-A valid fixture must produce immutable `MarketDefinition` with UP/DOWN token IDs, tick, min size, fee schedule, start/end, and raw market id.
+A valid fixture must produce immutable `MarketDefinition` with UP/DOWN token IDs, tick, min size, fee schedule, `mkt_ts`/`end_ts`, and raw market id.
 
 - [ ] **Step 2: Verify RED**
 
@@ -407,7 +407,7 @@ GammaClient.get_market_by_slug(slug) -> Mapping | None
 GammaClient.discover_current_and_next(symbols, now) -> tuple[MarketDefinition, ...]
 ```
 
-`GammaClient` exposes GET methods only and accepts an injected async callable `get_json(url, params)` for tests. Discovery requests exactly the floor-aligned current slug and current-plus-300 next slug for each symbol, then passes every response through `validate_market`.
+`GammaClient` exposes GET methods only and accepts an injected async callable `get_json(url, params)` for tests. Discovery requests exactly the floor-aligned current slug and current-plus-300 next slug for each symbol, then passes every response through `validate_market`. Parsing follows the official Gamma market response schema at <https://docs.polymarket.com/api-reference/markets/list-markets>; JSON-encoded `outcomes`/`clobTokenIds`, `eventStartTime`, `endDate`, `feeSchedule`, and the symbol-specific Chainlink stream are authoritative.
 
 - [ ] **Step 4: Verify and commit**
 
