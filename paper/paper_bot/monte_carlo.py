@@ -12,7 +12,7 @@ from .gamma import MarketDefinition
 from .resolver import ResolverState
 from .strategy import Confirmation, LaneKey, PositionPolicy, StrategyEvent
 
-MODEL_VERSION = "twap-segmented-block-bootstrap-v2"
+MODEL_VERSION = "twap-first-valid-window-bootstrap-v3"
 HORIZONS = (90, 60, 30)
 ENTRY_FLOOR = Decimal("0.85")
 ENTRY_CEILING = Decimal("0.90")
@@ -23,9 +23,20 @@ BLOCK_SIZE = 5
 PROBABILITY_QUANTUM = Decimal("0.0001")
 
 _CONFIRMATION_BY_HORIZON = {
-    90: Confirmation.MC_BOOTSTRAP_90_V2,
-    60: Confirmation.MC_BOOTSTRAP_60_V2,
-    30: Confirmation.MC_BOOTSTRAP_30_V2,
+    90: Confirmation.MC_BOOTSTRAP_90_V3,
+    60: Confirmation.MC_BOOTSTRAP_60_V3,
+    30: Confirmation.MC_BOOTSTRAP_30_V3,
+}
+
+_TRANSIENT_REASONS = {
+    "resolver_unavailable",
+    "resolver_stale",
+    "leader_unavailable",
+    "history_insufficient",
+    "continuous_history_insufficient",
+    "continuous_block_history_insufficient",
+    "book_invalid",
+    "book_empty",
 }
 
 
@@ -202,6 +213,7 @@ class MonteCarloShadowState:
         self.paper_notional_usd = paper_notional_usd
         self.config_hash = config_hash
         self._attempted: set[int] = set()
+        self._deferred: dict[int, str] = {}
         self._market_key: tuple[str, int] | None = None
 
     @property
@@ -246,8 +258,9 @@ class MonteCarloShadowState:
                 continue
             lower = HORIZONS[index + 1] if index + 1 < len(HORIZONS) else 0
             if seconds_to_close <= lower:
-                output.append(self._missed(market, horizon, seconds_to_close, event_ts_ms))
+                output.append(self._expired(market, horizon, seconds_to_close, event_ts_ms))
                 self._attempted.add(horizon)
+                self._deferred.pop(horizon, None)
             elif seconds_to_close <= horizon:
                 active_horizon = horizon
                 break
@@ -257,7 +270,11 @@ class MonteCarloShadowState:
         forecast, entry = self._evaluate(
             market, books, resolver, active_horizon, seconds_to_close, event_ts_ms, now_ms
         )
+        if forecast.reason in _TRANSIENT_REASONS:
+            self._deferred[active_horizon] = forecast.reason
+            return tuple(output)
         self._attempted.add(active_horizon)
+        self._deferred.pop(active_horizon, None)
         output.append(forecast)
         if entry is not None:
             output.append(entry)
@@ -409,9 +426,10 @@ class MonteCarloShadowState:
         values.update(overrides)
         return MonteCarloForecastEvent(**values, decision="REJECT", reason=reason)
 
-    def _missed(
+    def _expired(
         self, market: MarketDefinition, horizon: int, seconds_to_close: int, event_ts_ms: int
     ) -> MonteCarloForecastEvent:
+        deferred_reason = self._deferred.get(horizon)
         return MonteCarloForecastEvent(
             model_version=MODEL_VERSION,
             config_hash=self.config_hash,
@@ -435,8 +453,11 @@ class MonteCarloShadowState:
             simulations=0,
             sign_flips=None,
             mean_abs_step_bps=None,
-            decision="MISSED",
-            reason="window_missed",
+            decision="MISSED" if deferred_reason is None else "REJECT",
+            reason=(
+                "window_missed" if deferred_reason is None
+                else f"window_no_valid_snapshot_{deferred_reason}"
+            ),
         )
 
     def _bind_market(self, market: MarketDefinition) -> None:

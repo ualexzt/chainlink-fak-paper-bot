@@ -605,7 +605,7 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         confirmation = engine.storage.db.execute(
             "SELECT confirmation FROM signals WHERE confirmation LIKE 'MC_%'"
         ).fetchone()[0]
-        self.assertEqual(confirmation, "MC_BOOTSTRAP_90_V2")
+        self.assertEqual(confirmation, "MC_BOOTSTRAP_90_V3")
         engine.storage.close()
         engine.journal.close()
         restarted = await self.make_engine(
@@ -614,13 +614,13 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             {lane.confirmation.value for lane in restarted.positions[definition.market_id]},
-            {"MC_BOOTSTRAP_90_V2"},
+            {"MC_BOOTSTRAP_90_V3"},
         )
         self.now[0] = definition.end_ts + 1
         self.now_ms[0] = self.now[0] * 1000
         await restarted.reconcile_settlements()
         result = restarted.storage.db.execute(
-            "SELECT net_pnl FROM lane_results WHERE confirmation='MC_BOOTSTRAP_90_V2'"
+            "SELECT net_pnl FROM lane_results WHERE confirmation='MC_BOOTSTRAP_90_V3'"
         ).fetchone()
         self.assertIsNotNone(result)
         self.assertGreater(D(result[0]), D("0"))

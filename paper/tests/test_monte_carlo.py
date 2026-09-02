@@ -82,24 +82,39 @@ class MonteCarloTests(unittest.TestCase):
         self.assertEqual(forecast.horizon_seconds, 90)
         self.assertEqual(forecast.decision, "ENTER")
         self.assertEqual(forecast.break_even_probability, D("0.8500"))
-        self.assertEqual(entry.lane.confirmation, Confirmation.MC_BOOTSTRAP_90_V2)
+        self.assertEqual(entry.lane.confirmation, Confirmation.MC_BOOTSTRAP_90_V3)
         self.assertEqual(entry.fak.status, "full")
         self.assertEqual(state.on_event(self.market, self.books, self.resolver, 1_215_000, 1_215), ())
 
-    def test_stale_resolver_rejects_once_and_does_not_cherry_pick_later(self):
+    def test_stale_resolver_waits_for_first_valid_snapshot_in_fixed_window(self):
         state = MonteCarloShadowState(paper_notional_usd=D("5"), config_hash="b" * 64)
         events = state.on_event(self.market, self.books, self.resolver, 1_225_000, 1_225)
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].decision, "REJECT")
-        self.assertEqual(events[0].reason, "resolver_stale")
-        self.assertEqual(state.on_event(self.market, self.books, self.resolver, 1_225_100, 1_225), ())
+        self.assertEqual(events, ())
+        self.assertTrue(self.resolver.accept("btc", D("100.40"), 1_225_100, 1_225_100))
+        events = state.on_event(self.market, self.books, self.resolver, 1_225_100, 1_225, 1_225_100)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].decision, "ENTER")
 
-    def test_late_start_records_missed_windows_before_current_lane(self):
+    def test_window_records_reject_if_no_valid_snapshot_ever_arrives(self):
+        state = MonteCarloShadowState(paper_notional_usd=D("5"), config_hash="d" * 64)
+        self.assertEqual(state.on_event(self.market, self.books, self.resolver, 1_225_000, 1_225), ())
+        events = state.on_event(self.market, self.books, self.resolver, 1_240_000, 1_240)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].horizon_seconds, 90)
+        self.assertEqual(events[0].decision, "REJECT")
+        self.assertEqual(events[0].reason, "window_no_valid_snapshot_resolver_stale")
+
+    def test_late_start_records_missed_windows_then_waits_in_current_lane(self):
         state = MonteCarloShadowState(paper_notional_usd=D("5"), config_hash="c" * 64)
         events = state.on_event(self.market, self.books, self.resolver, 1_275_000, 1_275)
         self.assertEqual([event.horizon_seconds for event in events if isinstance(event, MonteCarloForecastEvent)],
-                         [90, 60, 30])
-        self.assertEqual([event.reason for event in events[:2]], ["window_missed", "window_missed"])
+                         [90, 60])
+        self.assertEqual([event.reason for event in events], ["window_missed", "window_missed"])
+        self.assertTrue(self.resolver.accept("btc", D("100.40"), 1_275_100, 1_275_100))
+        current = state.on_event(
+            self.market, self.books, self.resolver, 1_275_100, 1_275, 1_275_100
+        )
+        self.assertEqual(current[0].horizon_seconds, 30)
 
 
 if __name__ == "__main__":
