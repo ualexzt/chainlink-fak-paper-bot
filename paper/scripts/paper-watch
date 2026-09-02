@@ -8,7 +8,7 @@ if docker info >/dev/null 2>&1; then
 else
   DOCKER=(sudo docker)
 fi
-REFRESH="1.0"
+REFRESH="2.0"
 if (( $# > 0 )) && [[ "${1}" != -* ]]; then
   REFRESH="$1"
   shift

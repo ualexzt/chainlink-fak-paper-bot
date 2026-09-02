@@ -19,6 +19,7 @@ from paper_bot import cli
 from paper_bot.cli import main as cli_main
 from paper_bot.config import load_settings
 from paper_bot.domain import FakResult, FillLeg
+from paper_bot.monte_carlo import MODEL_VERSION, MonteCarloForecastEvent
 from paper_bot.settlement import OfficialSettlement
 from paper_bot.storage import Storage
 from paper_bot.strategy import Confirmation, LaneKey, PositionPolicy, StrategyEvent
@@ -46,7 +47,9 @@ class DashboardTests(unittest.TestCase):
         self.storage = Storage(self.path)
         self.storage.initialize()
         settings = load_settings({"DATA_DIR": self.tmp.name})
+        self.settings = settings
         experiment_hash = self.storage.ensure_experiment(settings)
+        self.experiment_hash = experiment_hash
         lane = LaneKey(D("0.80"), Confirmation.BOOK_ONLY, PositionPolicy.HOLD)
         definitions = (
             ("btc", "btc-market", 1_000, "full", "5"),
@@ -123,20 +126,86 @@ class DashboardTests(unittest.TestCase):
     def test_populated_dashboard_renders_live_accounting_and_health(self) -> None:
         output = self.rendered()
         for expected in (
-            "PAPER ONLY — NO ORDERS", "BTC", "ETH", "SOL", "countdown", "UP OK", "DOWN INVALID",
-            "start", "current", "distance", "leader", "mom 5s", "age", "0.8/BOOK_ONLY/HOLD",
-            "full/partial/zero", "2/1/1", "resolved", "1/1", "net PnL", "EV/share", "drawdown",
-            "Open old/new inventory", "requested/filled", "VWAP", "payout scenarios",
-            "reconnect", "stale", "database", "disk", "market_reconnect",
+            "PAPER ONLY · NO ORDERS", "OVERVIEW", "Market pulse", "BTC", "SOL", "UP bid / ask",
+            "CL leader", "Our signals", "observational", "BASE ONLY UP",
+            "Open paper inventory", "virtual fills only", "System state", "market books",
+            "Chainlink resolver", "database", "disk / journal",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, output)
 
     def test_lane_and_asset_filters_are_applied(self) -> None:
-        output = self.rendered(asset="btc", threshold="0.8", confirmation="BOOK_ONLY", policy="HOLD")
+        output = self.rendered(
+            asset="btc", threshold="0.8", confirmation="BOOK_ONLY", policy="HOLD",
+            view="performance",
+        )
         self.assertIn("BTC", output)
         self.assertNotIn("eth-updown", output)
-        self.assertIn("0.8/BOOK_ONLY/HOLD", output)
+        self.assertIn("BOOK_ONLY", output)
+        self.assertIn("HOLD", output)
+
+    def test_views_separate_overview_performance_and_activity(self) -> None:
+        performance = self.rendered(view="performance")
+        self.assertIn("Strategy scoreboard", performance)
+        self.assertIn("Monte Carlo outcomes", performance)
+        self.assertNotIn("Open paper inventory", performance)
+
+        activity = self.rendered(view="activity")
+        self.assertIn("Monte Carlo decision log", activity)
+        self.assertIn("Feed and storage timeline", activity)
+        self.assertIn("market_reconnect", activity)
+        self.assertNotIn("Strategy scoreboard", activity)
+
+    def test_composite_signal_agrees_and_deduplicates_exit_policies(self) -> None:
+        storage = Storage(self.path)
+        storage.initialize()
+        self.assertEqual(storage.ensure_experiment(self.settings), self.experiment_hash)
+        for policy in (PositionPolicy.IMMEDIATE_REVERSE, PositionPolicy.CHAINLINK_REVERSE):
+            storage.record_strategy_events((StrategyEvent(
+                LaneKey(D("0.80"), Confirmation.BOOK_ONLY, policy),
+                "entry_attempt", "btc-market", 1_000, "btc-up-0", "UP",
+                1_150_000, 1, self.experiment_hash, fak("full", "5"),
+            ),))
+        storage.record_strategy_events((MonteCarloForecastEvent(
+            model_version=MODEL_VERSION, config_hash=self.experiment_hash,
+            market_id="btc-market", mkt_ts=1_000, horizon_seconds=90,
+            seconds_to_close=90, event_ts_ms=1_210_000, observation_ts_ms=1_209_000,
+            side="UP", token_id="btc-up-0", book_generation=1,
+            best_ask=D("0.86"), start=D("100"), current=D("101"),
+            distance_bps=D("100"), probability=D("0.95"),
+            break_even_probability=D("0.90"), edge=D("0.05"),
+            history_points=60, simulations=10_000, sign_flips=4,
+            mean_abs_step_bps=D("1.2"), decision="ENTER", reason="eligible",
+        ),))
+        storage.close()
+
+        output = self.rendered()
+        self.assertIn("CONFIRMED UP", output)
+        self.assertIn("1 UP", output)  # one trigger, not three exit-policy copies
+        self.assertIn("1/1 UP", output)
+        self.assertIn("0.95", output)
+        self.assertIn("0.05", output)
+
+    def test_rejected_monte_carlo_observation_is_not_rendered_as_a_loss(self) -> None:
+        storage = Storage(self.path)
+        storage.initialize()
+        self.assertEqual(storage.ensure_experiment(self.settings), self.experiment_hash)
+        storage.record_strategy_events((MonteCarloForecastEvent(
+            model_version=MODEL_VERSION, config_hash=self.experiment_hash,
+            market_id="btc-market", mkt_ts=1_000, horizon_seconds=90,
+            seconds_to_close=90, event_ts_ms=1_210_000, observation_ts_ms=1_209_000,
+            side=None, token_id=None, book_generation=None, best_ask=D("0.80"),
+            start=D("100"), current=D("101"), distance_bps=D("100"),
+            probability=None, break_even_probability=None, edge=None,
+            history_points=60, simulations=0, sign_flips=None,
+            mean_abs_step_bps=None, decision="REJECT", reason="ask_outside_entry_band",
+        ),))
+        storage.close()
+
+        output = self.rendered(view="activity")
+        self.assertIn("REJECT", output)
+        self.assertIn("NO TRADE", output)
+        self.assertNotIn("LOSS", output)
 
     def test_uses_mode_ro_and_write_attempt_fails(self) -> None:
         before = self.path.read_bytes()
@@ -179,12 +248,13 @@ class DashboardTests(unittest.TestCase):
         with patch("paper_bot.tui.watch", return_value=0) as runner:
             self.assertEqual(cli_main([
                 "watch", "--db", str(self.path), "--refresh", "2",
+                "--view", "performance",
                 "--asset", "btc", "--threshold", "0.8",
                 "--confirmation", "BOOK_ONLY", "--policy", "HOLD",
             ], environment=ForbiddenEnvironment()), 0)
         runner.assert_called_once_with(
             str(self.path), 2.0, asset="btc", threshold="0.8",
-            confirmation="BOOK_ONLY", policy="HOLD",
+            confirmation="BOOK_ONLY", policy="HOLD", view="performance",
         )
 
 

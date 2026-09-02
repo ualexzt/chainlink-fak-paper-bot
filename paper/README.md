@@ -19,7 +19,9 @@ cd paper
 cp .env.example .env                 # optional; contains public settings only
 ./scripts/paper-bot start             # build and start paper-engine
 ./scripts/paper-bot status
-./scripts/paper-watch                 # attach read-only dashboard
+./scripts/paper-watch                         # calm overview with market pulse and composite signals
+./scripts/paper-watch --view performance      # settled strategy and Monte Carlo scoreboards
+./scripts/paper-watch --view activity         # recent Monte Carlo decisions and feed events
 ./scripts/paper-bot logs              # follow engine logs
 ./scripts/paper-bot stop
 ```
@@ -29,6 +31,19 @@ The lifecycle wrapper accepts only `start`, `stop`, `status`, and `logs`. The wa
 ```sh
 PYTHONPATH=paper python -m paper_bot.cli check-db
 ```
+
+The default `overview` is deliberately compact and refreshes every two seconds in
+the terminal alternate screen to avoid scrollback churn and visible full-screen
+flashing. `Our signals` is a derived, read-only explanation layer over persisted
+evidence:
+
+- `CONFIRMED` means the deduplicated base-lane direction and eligible Monte Carlo direction agree;
+- `BASE ONLY` or `MC ONLY` identifies which model has produced directional evidence;
+- `CONFLICT` means the sources disagree, and `WAIT` means neither has an eligible direction;
+- base support counts a threshold/confirmation/side trigger once, not once per exit policy;
+- Monte Carlo support reports eligible horizons out of the immutable observations received so far.
+
+These labels are observational paper signals. They never create an order or change engine state.
 
 The container binds `paper/runtime` to `/data`. The database is `/data/paper.db`; raw journals are `/data/raw-journal/raw-events-YYYY-MM-DD.jsonl` and compressed closed-day archives. The runtime directory is intentionally excluded from the image and should be backed up independently.
 
