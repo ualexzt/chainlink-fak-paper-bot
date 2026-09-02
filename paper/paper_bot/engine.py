@@ -13,11 +13,12 @@ from .config import Settings
 from .gamma import GammaClient, MarketDefinition
 from .journal import JournalError, RawEvent, RawJournal
 from .market_ws import MarketDelta, MarketInvalidation, MarketSnapshot, MarketWsClient
+from .monte_carlo import MonteCarloForecastEvent, MonteCarloShadowState
 from .resolver import ResolverState
 from .rtds import ResolverObservation, RtdsClient
 from .settlement import OfficialSettlement, parse_official_settlement
 from .storage import PersistedMarketState, Storage
-from .strategy import LaneKey, MarketStrategyState, StrategyEvent
+from .strategy import BASE_CONFIRMATIONS, LaneKey, MarketStrategyState, StrategyEvent
 
 UTC = timezone.utc
 
@@ -73,6 +74,7 @@ class PaperEngine:
         self.markets: dict[str, MarketDefinition] = {}
         self.books: dict[str, OrderBook] = {}
         self.strategies: dict[str, MarketStrategyState] = {}
+        self.monte_carlo_strategies: dict[str, MonteCarloShadowState] = {}
         self.positions: dict[str, dict[LaneKey, LanePosition]] = {}
         self._token_market: dict[str, str] = {}
         self._settled: set[str] = set()
@@ -142,6 +144,13 @@ class PaperEngine:
             config_hash=self.experiment_hash,
         )
 
+    def _monte_carlo_strategy(self) -> MonteCarloShadowState:
+        assert self.experiment_hash is not None
+        return MonteCarloShadowState(
+            paper_notional_usd=self.settings.paper_notional_usd,
+            config_hash=self.experiment_hash,
+        )
+
     def _register_markets(self, definitions: Any) -> None:
         before = self.token_ids()
         for market in definitions:
@@ -177,6 +186,9 @@ class PaperEngine:
             # use the latest validated execution parameters.
             self.markets[market.market_id] = market
             self.strategies.setdefault(market.market_id, self._strategy())
+            self.monte_carlo_strategies.setdefault(
+                market.market_id, self._monte_carlo_strategy()
+            )
             self.positions.setdefault(market.market_id, {})
         if self._running and self.token_ids() != before:
             self._subscriptions_changed.set()
@@ -187,10 +199,17 @@ class PaperEngine:
         ):
             raise EngineInvariantError("persisted market identity changed")
         strategy = self.strategies[market.market_id]
-        reversed_lanes = tuple(
-            record.lane for record in persisted.lane_records if record.reverse_attempted
+        base_attempted = tuple(
+            lane for lane in persisted.attempted_lane_keys if lane.confirmation in BASE_CONFIRMATIONS
         )
-        strategy.restore_attempts(persisted.attempted_lane_keys, reversed_lanes)
+        reversed_lanes = tuple(
+            record.lane for record in persisted.lane_records
+            if record.reverse_attempted and record.lane.confirmation in BASE_CONFIRMATIONS
+        )
+        strategy.restore_attempts(base_attempted, reversed_lanes)
+        self.monte_carlo_strategies[market.market_id].restore_attempts(
+            persisted.monte_carlo_horizons
+        )
         restored_positions: dict[LaneKey, LanePosition] = {}
         for record in persisted.lane_records:
             if record.entry.config_hash != persisted.experiment_hash:
@@ -398,6 +417,8 @@ class PaperEngine:
     def _adopt_events(self, market: MarketDefinition, events: tuple[Any, ...]) -> None:
         market_positions = self.positions[market.market_id]
         for event in events:
+            if isinstance(event, MonteCarloForecastEvent):
+                continue
             if isinstance(event, StrategyEvent):
                 market_positions[event.lane] = LanePosition(
                     market.market_id, market.end_ts, event.lane,
@@ -467,7 +488,11 @@ class PaperEngine:
         entry_events = strategy.on_book_event(
             market, self._book_mapping(market), self.resolver, event.event_ts_ms, now_s
         )
-        events = reverse_events + entry_events
+        monte_carlo_events = self.monte_carlo_strategies[market_id].on_event(
+            market, self._book_mapping(market), self.resolver, event.event_ts_ms, now_s,
+            self._now_ms(),
+        )
+        events = reverse_events + entry_events + monte_carlo_events
         if await self._persist_events(events):
             self._adopt_events(market, events)
 
@@ -487,9 +512,14 @@ class PaperEngine:
             if market.symbol != event.symbol or market.market_id in self._inactive:
                 continue
             reverses = self._reverse_events(market, event.observation_ts_ms, now_s)
-            if reverses:
-                events_by_market.append((market, reverses))
-                all_events.extend(reverses)
+            monte_carlo = self.monte_carlo_strategies[market.market_id].on_event(
+                market, self._book_mapping(market), self.resolver,
+                event.observation_ts_ms, now_s, self._now_ms(),
+            )
+            events = reverses + monte_carlo
+            if events:
+                events_by_market.append((market, events))
+                all_events.extend(events)
         materialized = tuple(all_events)
         if await self._persist_events(materialized):
             for market, events in events_by_market:
@@ -501,7 +531,8 @@ class PaperEngine:
         now_s = self._now_s()
         for market in tuple(self.markets.values()):
             positions = self.positions[market.market_id]
-            if market.market_id in self._settled or market.end_ts > now_s or not positions:
+            observed = self.monte_carlo_strategies[market.market_id].has_observations
+            if market.market_id in self._settled or market.end_ts > now_s or not (positions or observed):
                 continue
             payload = await self.settlement_fetcher(market)
             if isinstance(payload, OfficialSettlement):

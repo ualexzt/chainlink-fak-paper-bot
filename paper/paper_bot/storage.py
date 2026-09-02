@@ -13,6 +13,7 @@ from typing import Any
 from .accounting import LaneResult
 from .config import Settings
 from .domain import FakResult, FillLeg, InventoryLot, ReverseSequence
+from .monte_carlo import MonteCarloForecastEvent
 from .settlement import OfficialSettlement
 from .strategy import Confirmation, LaneKey, PositionPolicy, StrategyEvent
 
@@ -20,7 +21,7 @@ TABLES = (
     "experiment_versions", "markets", "tokens", "resolver_observations",
     "book_generations", "signals", "paper_orders", "paper_fill_legs",
     "inventory_lots", "reverse_sequences", "settlements", "lane_results",
-    "health_events", "dashboard_snapshots", "dashboard_market_metadata",
+    "monte_carlo_forecasts", "health_events", "dashboard_snapshots", "dashboard_market_metadata",
 )
 EXPERIMENT_SCHEMA_VERSION = "chainlink-fak-paper-v1"
 ZERO = Decimal("0")
@@ -50,6 +51,7 @@ class PersistedMarketState:
     attempted_lane_keys: tuple[LaneKey, ...]
     open_positions: tuple[PersistedPosition, ...]
     lane_records: tuple[PersistedPosition, ...]
+    monte_carlo_horizons: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,7 @@ class DashboardReadModel:
     market_metadata: tuple[Mapping[str, Any], ...]
     entries: tuple[Mapping[str, Any], ...]
     inventory: tuple[Mapping[str, Any], ...]
+    monte_carlo_forecasts: tuple[Mapping[str, Any], ...]
     health_events: tuple[Mapping[str, Any], ...]
 
 
@@ -322,6 +325,19 @@ CREATE TABLE IF NOT EXISTS signals(
     UNIQUE(experiment_hash,market_id,threshold,confirmation,policy,phase),
     FOREIGN KEY(experiment_hash,market_id) REFERENCES markets(experiment_hash,market_id)
 );
+CREATE TABLE IF NOT EXISTS monte_carlo_forecasts(
+    forecast_id TEXT PRIMARY KEY CHECK(length(forecast_id)=64),
+    experiment_hash TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    horizon_seconds INTEGER NOT NULL CHECK(horizon_seconds IN (30,60,90)),
+    event_ts_ms INTEGER NOT NULL CHECK(event_ts_ms>=0),
+    decision TEXT NOT NULL CHECK(decision IN ('ENTER','REJECT','MISSED')),
+    reason TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    UNIQUE(experiment_hash,market_id,model_version,horizon_seconds),
+    FOREIGN KEY(experiment_hash,market_id) REFERENCES markets(experiment_hash,market_id)
+);
 CREATE TABLE IF NOT EXISTS paper_orders(
     order_id TEXT PRIMARY KEY CHECK(length(order_id)=64),
     signal_id TEXT NOT NULL REFERENCES signals(signal_id) ON DELETE CASCADE,
@@ -436,6 +452,7 @@ class Storage:
             # Dashboard tables are additive; an old database remains safely
             # attachable in read-only mode until the engine migrates it.
             missing.difference_update({"dashboard_snapshots", "dashboard_market_metadata"})
+            missing.discard("monte_carlo_forecasts")
             if missing:
                 raise StorageInvariantError("storage schema is incomplete")
             return
@@ -498,7 +515,9 @@ class Storage:
         self._experiment_hash = digest
         return digest
 
-    def record_strategy_events(self, events: Iterable[StrategyEvent | ReverseSequence]) -> None:
+    def record_strategy_events(
+        self, events: Iterable[StrategyEvent | ReverseSequence | MonteCarloForecastEvent]
+    ) -> None:
         db = self._writable()
         experiment_hash = self._require_experiment()
         materialized = tuple(events)
@@ -509,6 +528,8 @@ class Storage:
                     self._record_entry(db, experiment_hash, event)
                 elif isinstance(event, ReverseSequence):
                     self._record_reverse(db, experiment_hash, event)
+                elif isinstance(event, MonteCarloForecastEvent):
+                    self._record_monte_carlo_forecast(db, experiment_hash, event)
                 else:
                     raise TypeError("unsupported strategy event")
             db.commit()
@@ -660,6 +681,38 @@ class Storage:
                  event.token_id, event.side, canonical_decimal(event.fak.filled_shares), "entry"),
             )
 
+    def _record_monte_carlo_forecast(
+        self, db: sqlite3.Connection, experiment_hash: str, event: MonteCarloForecastEvent
+    ) -> None:
+        if event.config_hash != experiment_hash:
+            raise StorageInvariantError("Monte Carlo experiment mismatch")
+        if event.horizon_seconds not in {30, 60, 90}:
+            raise StorageInvariantError("Monte Carlo horizon is invalid")
+        if event.decision not in {"ENTER", "REJECT", "MISSED"} or not event.reason:
+            raise StorageInvariantError("Monte Carlo decision is invalid")
+        self._ensure_market(db, experiment_hash, event.market_id, event.mkt_ts)
+        forecast_id = _hash(
+            experiment_hash, event.market_id, event.model_version, str(event.horizon_seconds)
+        )
+        payload = _json(event)
+        existing = db.execute(
+            "SELECT payload_json FROM monte_carlo_forecasts WHERE forecast_id=?", (forecast_id,)
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != payload:
+                raise StorageInvariantError("conflicting duplicate Monte Carlo forecast")
+            return
+        db.execute(
+            """INSERT INTO monte_carlo_forecasts
+               (forecast_id,experiment_hash,market_id,model_version,horizon_seconds,
+                event_ts_ms,decision,reason,payload_json)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                forecast_id, experiment_hash, event.market_id, event.model_version,
+                event.horizon_seconds, event.event_ts_ms, event.decision, event.reason, payload,
+            ),
+        )
+
     def _record_reverse(self, db: sqlite3.Connection, experiment_hash: str, event: ReverseSequence) -> None:
         if event.config_hash != experiment_hash or event.status != "COMPLETE":
             raise StorageInvariantError("reverse experiment or status mismatch")
@@ -752,6 +805,13 @@ class Storage:
                    WHERE experiment_hash=? AND market_id=? AND phase='ENTRY'
                    ORDER BY threshold,confirmation,policy""", args,
             ).fetchall()
+            monte_carlo_horizons = tuple(
+                int(row[0]) for row in db.execute(
+                    """SELECT horizon_seconds FROM monte_carlo_forecasts
+                       WHERE experiment_hash=? AND market_id=? ORDER BY horizon_seconds DESC""",
+                    args,
+                )
+            )
             attempted = tuple(
                 LaneKey(Decimal(row["threshold"]), Confirmation(row["confirmation"]), PositionPolicy(row["policy"]))
                 for row in signals
@@ -787,7 +847,7 @@ class Storage:
             states.append(
                 PersistedMarketState(
                     market["experiment_hash"], market["market_id"], market["mkt_ts"], market["close_ts"],
-                    attempted, tuple(positions), tuple(lane_records),
+                    attempted, tuple(positions), tuple(lane_records), monte_carlo_horizons,
                 )
             )
         return tuple(states)
@@ -800,8 +860,13 @@ class Storage:
         if not market_id or not isinstance(settlement, OfficialSettlement):
             raise TypeError("invalid settlement input")
         materialized = tuple(results)
-        if not materialized:
-            raise StorageInvariantError("settlement requires lane results")
+        forecast_exists = db.execute(
+            """SELECT 1 FROM monte_carlo_forecasts
+               WHERE experiment_hash=? AND market_id=? LIMIT 1""",
+            (experiment_hash, market_id),
+        ).fetchone() is not None
+        if not materialized and not forecast_exists:
+            raise StorageInvariantError("settlement requires lane results or a Monte Carlo forecast")
         if any(
             not isinstance(result, LaneResult) or not result.settled
             or result.market_id != market_id or result.config_hash != experiment_hash
@@ -1006,10 +1071,23 @@ class Storage:
             ("" if experiment_hash is None else " AND experiment_hash=?") +
             " ORDER BY market_id,threshold,confirmation,policy,lot_id", args,
         ))
+        try:
+            monte_carlo = tuple(dict(row) for row in db.execute(
+                """SELECT f.experiment_hash,f.market_id,f.model_version,f.horizon_seconds,
+                          f.event_ts_ms,f.decision,f.reason,f.payload_json,s.winner
+                   FROM monte_carlo_forecasts f
+                   LEFT JOIN settlements s ON s.market_id=f.market_id""" +
+                ("" if experiment_hash is None else " WHERE f.experiment_hash=?") +
+                " ORDER BY f.event_ts_ms DESC,f.horizon_seconds DESC LIMIT 100", args,
+            ))
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            monte_carlo = ()
         health = tuple(dict(row) for row in db.execute(
             "SELECT event_ts_ms,kind,payload_json FROM health_events ORDER BY id DESC LIMIT 30"
         ))
-        return DashboardReadModel(snapshot, metadata, entries, inventory, health)
+        return DashboardReadModel(snapshot, metadata, entries, inventory, monte_carlo, health)
 
 
 __all__ = [

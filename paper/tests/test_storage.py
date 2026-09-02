@@ -11,6 +11,7 @@ from pathlib import Path
 from paper_bot.accounting import LanePosition, settle_lane
 from paper_bot.config import load_settings
 from paper_bot.domain import FakResult, FillLeg, InventoryLot, ReverseSequence
+from paper_bot.monte_carlo import MODEL_VERSION, MonteCarloForecastEvent
 from paper_bot.settlement import OfficialSettlement
 from paper_bot.storage import Storage, StorageInvariantError, TABLES, canonical_decimal
 from paper_bot.strategy import Confirmation, LaneKey, PositionPolicy, StrategyEvent
@@ -272,6 +273,27 @@ class StorageTests(unittest.TestCase):
                 "market-1", settlement, (replace(result, lane=unsignaled_lane),)
             )
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM settlements").fetchone()[0], 0)
+
+    def test_rejected_monte_carlo_forecast_is_restored_and_settled_without_position(self):
+        forecast = MonteCarloForecastEvent(
+            model_version=MODEL_VERSION, config_hash=self.experiment_hash,
+            market_id="market-1", mkt_ts=1_000, horizon_seconds=90,
+            seconds_to_close=89, event_ts_ms=1_211_000, observation_ts_ms=1_210_000,
+            side="UP", token_id="up-token", book_generation=1, best_ask=D("0.84"),
+            start=D("100"), current=D("101"), distance_bps=D("100"),
+            probability=D("0.9"), break_even_probability=None, edge=None,
+            history_points=40, simulations=10_000, sign_flips=2,
+            mean_abs_step_bps=D("1.25"), decision="REJECT",
+            reason="ask_outside_entry_band",
+        )
+        self.storage.record_strategy_events((forecast,))
+        self.storage.record_strategy_events((forecast,))
+        state = self.storage.load_open_market_states()[0]
+        self.assertEqual(state.monte_carlo_horizons, (90,))
+        self.assertEqual(state.open_positions, ())
+        self.storage.record_settlement("market-1", OfficialSettlement("UP", 1_301), ())
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM settlements").fetchone()[0], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM lane_results").fetchone()[0], 0)
 
     def test_same_factual_settlement_supports_two_experiment_versions(self):
         self.storage.record_strategy_events((self.entry,))

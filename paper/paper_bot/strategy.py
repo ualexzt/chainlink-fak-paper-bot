@@ -23,6 +23,9 @@ class Confirmation(str, Enum):
     BOOK_ONLY = "BOOK_ONLY"
     CHAINLINK_DIRECTION = "CHAINLINK_DIRECTION"
     CHAINLINK_CONFIRMED = "CHAINLINK_CONFIRMED"
+    MC_BOOTSTRAP_90_V1 = "MC_BOOTSTRAP_90_V1"
+    MC_BOOTSTRAP_60_V1 = "MC_BOOTSTRAP_60_V1"
+    MC_BOOTSTRAP_30_V1 = "MC_BOOTSTRAP_30_V1"
 
 
 class PositionPolicy(str, Enum):
@@ -53,6 +56,11 @@ class StrategyEvent:
 
 
 DEFAULT_THRESHOLDS = tuple(Decimal(value) for value in ("0.80", "0.85", "0.89", "0.90"))
+BASE_CONFIRMATIONS = (
+    Confirmation.BOOK_ONLY,
+    Confirmation.CHAINLINK_DIRECTION,
+    Confirmation.CHAINLINK_CONFIRMED,
+)
 
 
 def _validated_thresholds(thresholds: Sequence[Decimal]) -> tuple[Decimal, ...]:
@@ -73,7 +81,7 @@ def all_lane_keys(thresholds: Sequence[Decimal] | None = None) -> tuple[LaneKey,
     return tuple(
         LaneKey(threshold, confirmation, policy)
         for threshold in values
-        for confirmation in Confirmation
+        for confirmation in BASE_CONFIRMATIONS
         for policy in PositionPolicy
     )
 
@@ -212,7 +220,7 @@ class MarketStrategyState:
         for threshold in self.thresholds:
             if threshold not in crossed_thresholds:
                 continue
-            for confirmation in Confirmation:
+            for confirmation in BASE_CONFIRMATIONS:
                 attempt_key = (threshold, confirmation)
                 if attempt_key in self._attempted or not self._gate(confirmation, side, resolver_view):
                     continue
@@ -439,6 +447,7 @@ class MarketStrategyState:
 
 __all__ = [
     "Confirmation",
+    "BASE_CONFIRMATIONS",
     "LaneKey",
     "MarketStrategyState",
     "PositionPolicy",

@@ -191,5 +191,12 @@ class ResolverState:
                 stale.append(symbol)
         return tuple(stale)
 
+    def history(self, symbol: str) -> tuple[tuple[int, Decimal], ...]:
+        """Return an immutable causal copy of accepted observations."""
+        symbol = self._validate_symbol(symbol)
+        if symbol not in self._symbol_set:
+            raise ValueError("unknown symbol")
+        return tuple(self._states[symbol].history)
+
 
 __all__ = ["ResolverState", "ResolverView"]

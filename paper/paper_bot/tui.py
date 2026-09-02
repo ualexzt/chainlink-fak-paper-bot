@@ -60,6 +60,7 @@ class PaperDashboard:
             threshold = format(normalized_threshold, "f").rstrip("0").rstrip(".")
         if confirmation is not None and confirmation not in {
             "BOOK_ONLY", "CHAINLINK_DIRECTION", "CHAINLINK_CONFIRMED",
+            "MC_BOOTSTRAP_90_V1", "MC_BOOTSTRAP_60_V1", "MC_BOOTSTRAP_30_V1",
         }:
             raise ValueError("confirmation filter is invalid")
         if policy is not None and policy not in {"HOLD", "IMMEDIATE_REVERSE", "CHAINLINK_REVERSE"}:
@@ -205,6 +206,29 @@ class PaperDashboard:
                          f"UP {_fmt(totals['UP'])} | DOWN {_fmt(totals['DOWN'])}"))
         return rows
 
+    def _monte_carlo_rows(
+        self, data: DashboardReadModel, symbols: Mapping[str, str]
+    ) -> list[tuple[Any, ...]]:
+        rows = []
+        for row in data.monte_carlo_forecasts:
+            symbol = symbols.get(str(row["market_id"]), "?")
+            if self.asset is not None and symbol != self.asset:
+                continue
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            outcome = "—" if row["winner"] is None else (
+                "WIN" if payload.get("side") == row["winner"] else "LOSS"
+            )
+            rows.append((
+                symbol.upper(), f"{row['horizon_seconds']}s", payload.get("side") or "—",
+                _fmt(payload.get("best_ask"), 3), _fmt(payload.get("probability"), 3),
+                _fmt(payload.get("break_even_probability"), 3), _fmt(payload.get("edge"), 3),
+                row["decision"], row["reason"], outcome,
+            ))
+        return rows
+
     def _health_rows(self, data: DashboardReadModel, snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
         health, markets, resolver = snapshot.get("health", {}), snapshot.get("markets", ()), snapshot.get("resolver", ())
         reconnect = not markets or any(
@@ -240,7 +264,8 @@ class PaperDashboard:
         layout = Layout(name="root")
         layout.split_column(
             Layout(name="banner", size=3), Layout(name="top", size=12),
-            Layout(name="matrix", size=8), Layout(name="positions", size=8),
+            Layout(name="matrix", size=8), Layout(name="monte_carlo", size=8),
+            Layout(name="positions", size=8),
             Layout(name="health", size=12),
         )
         layout["banner"].update(Panel("PAPER ONLY — NO ORDERS", style="bold white on dark_green"))
@@ -251,9 +276,15 @@ class PaperDashboard:
                              ("lane", "signals", "full/partial/zero", "resolved", "W/L", "net PnL", "EV/share", "drawdown", "reverse done"), self._strategy_rows(data, symbols))
         positions = self._panel("Open old/new inventory and projected payouts",
                                 ("asset", "lane", "initial", "requested/filled", "VWAP", "old/new", "net cash flow", "payout scenarios"), self._position_rows(data, symbols))
+        monte_carlo = self._panel(
+            "Monte Carlo shadow — immutable 90/60/30s observations",
+            ("asset", "window", "side", "ask", "P(win)", "break-even", "edge", "decision", "reason", "result"),
+            self._monte_carlo_rows(data, symbols),
+        )
         health = self._panel("Events / reconnect / stale / database / disk", ("source", "state", "detail"), self._health_rows(data, snapshot))
         layout["top"].update(top)
         layout["matrix"].update(matrix)
+        layout["monte_carlo"].update(monte_carlo)
         layout["positions"].update(positions)
         layout["health"].update(health)
         return layout

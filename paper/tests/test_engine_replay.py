@@ -571,6 +571,57 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot["health"]["journal_writable"])
         self.assertIsInstance(snapshot["health"]["disk_free_bytes"], int)
 
+    async def test_monte_carlo_shadow_entry_is_persisted_and_officially_settled(self):
+        definition = market()
+
+        async def fetch(_definition):
+            return settlement_payload(definition, "UP")
+
+        self.now[0] = definition.mkt_ts
+        self.now_ms[0] = definition.mkt_ts * 1000
+        engine = await self.make_engine(
+            (definition,), db_name="monte-carlo.db", settlement_fetcher=fetch
+        )
+        await self.seed_books(engine, definition, up_ask="0.85", down_ask="0.15")
+        for index in range(40):
+            timestamp = definition.mkt_ts * 1000 + index * 5_500
+            self.now_ms[0] = timestamp
+            self.now[0] = (timestamp + 999) // 1000
+            value = D("100") + D(index) / D("100")
+            await engine.process_resolver_event(ResolverObservation(
+                "btc", value, timestamp, timestamp,
+                {"topic": "crypto_prices_twap_sixty", "type": "update", "payload": {
+                    "symbol": "btc/usd", "full_accuracy_value": str(int(value * D(10) ** 18)),
+                    "timestamp": timestamp, "window_s": 60,
+                }},
+            ))
+        forecasts = engine.storage.db.execute(
+            "SELECT horizon_seconds,decision FROM monte_carlo_forecasts ORDER BY horizon_seconds DESC"
+        ).fetchall()
+        self.assertEqual([tuple(row) for row in forecasts], [(90, "ENTER")])
+        confirmation = engine.storage.db.execute(
+            "SELECT confirmation FROM signals WHERE confirmation LIKE 'MC_%'"
+        ).fetchone()[0]
+        self.assertEqual(confirmation, "MC_BOOTSTRAP_90_V1")
+        engine.storage.close()
+        engine.journal.close()
+        restarted = await self.make_engine(
+            (definition,), db_name="monte-carlo.db", journal_name="monte-carlo-restart",
+            settlement_fetcher=fetch,
+        )
+        self.assertEqual(
+            {lane.confirmation.value for lane in restarted.positions[definition.market_id]},
+            {"MC_BOOTSTRAP_90_V1"},
+        )
+        self.now[0] = definition.end_ts + 1
+        self.now_ms[0] = self.now[0] * 1000
+        await restarted.reconcile_settlements()
+        result = restarted.storage.db.execute(
+            "SELECT net_pnl FROM lane_results WHERE confirmation='MC_BOOTSTRAP_90_V1'"
+        ).fetchone()
+        self.assertIsNotNone(result)
+        self.assertGreater(D(result[0]), D("0"))
+
     async def test_transient_dashboard_write_failure_gates_then_recovers(self):
         engine = await self.make_engine((market(),), db_name="dashboard-retry.db")
         original = engine.storage.write_dashboard_snapshot

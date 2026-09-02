@@ -9,6 +9,7 @@ from paper_bot.books import OrderBook
 from paper_bot.domain import BookLevel, FeeSchedule
 from paper_bot.gamma import MarketDefinition
 from paper_bot.strategy import (
+    BASE_CONFIRMATIONS,
     Confirmation,
     LaneKey,
     MarketStrategyState,
@@ -123,9 +124,9 @@ class StrategyTests(unittest.TestCase):
         self._set_best_ask("UP", D("0.79"), D("0.80"), 2)
         events = state.on_book_event(self.market, self.books, resolver, 1_200_100, 1_200)
         self.assertEqual(len(events), 9)
-        self.assertEqual({event.lane.confirmation for event in events}, set(Confirmation))
+        self.assertEqual({event.lane.confirmation for event in events}, set(BASE_CONFIRMATIONS))
         self.assertEqual(resolver.calls[-1], ("btc", 1_000, 1_200_000))
-        for confirmation in Confirmation:
+        for confirmation in BASE_CONFIRMATIONS:
             results = [event.fak for event in events if event.lane.confirmation is confirmation]
             self.assertEqual(len(results), 3)
             self.assertTrue(all(result is results[0] for result in results))
