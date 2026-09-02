@@ -78,23 +78,43 @@ def _levels(value: Any) -> tuple[BookLevel, ...]:
     return tuple(result)
 
 
-def _mapping_message(raw: str | bytes | Mapping[str, Any]) -> Mapping[str, Any] | None:
+def _mapping_messages(
+    raw: str | bytes | Mapping[str, Any] | list[Any],
+) -> tuple[Mapping[str, Any], ...]:
     try:
         value = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, Mapping) else None
+        return ()
+    if isinstance(value, Mapping):
+        return (value,)
+    if isinstance(value, list) and value and all(isinstance(item, Mapping) for item in value):
+        return tuple(value)
+    return ()
 
 
 def parse_market_message(
-    raw: str | bytes | Mapping[str, Any], *, sequence: int
+    raw: str | bytes | Mapping[str, Any] | list[Any], *, sequence: int
 ) -> tuple[MarketSnapshot | MarketDelta, ...]:
     """Parse official direct frames and the documented public-client envelope."""
     if isinstance(raw, str) and raw == "PONG":
         return ()
-    message = _mapping_message(raw)
-    if message is None:
+    messages = _mapping_messages(raw)
+    if not messages:
         return ()
+    events: list[MarketSnapshot | MarketDelta] = []
+    next_sequence = sequence
+    for message in messages:
+        parsed = _parse_market_mapping(message, sequence=next_sequence)
+        if not parsed:
+            return ()
+        events.extend(parsed)
+        next_sequence += len(parsed)
+    return tuple(events)
+
+
+def _parse_market_mapping(
+    message: Mapping[str, Any], *, sequence: int
+) -> tuple[MarketSnapshot | MarketDelta, ...]:
     try:
         event_type = message.get("event_type", message.get("type"))
         payload = message.get("payload", message)

@@ -222,8 +222,15 @@ class GammaClient:
     base_url: str
     get_json: JsonGetter
 
-    async def get_market_by_slug(self, slug: str) -> Mapping[str, Any] | None:
-        response = await self.get_json(self.base_url.rstrip("/") + "/markets", {"slug": slug})
+    async def get_market_by_slug(
+        self, slug: str, *, include_closed: bool = False,
+    ) -> Mapping[str, Any] | None:
+        if not isinstance(include_closed, bool):
+            raise GammaValidationError("include_closed must be boolean")
+        params = {"slug": slug}
+        if include_closed:
+            params["closed"] = "true"
+        response = await self.get_json(self.base_url.rstrip("/") + "/markets", params)
         if not isinstance(response, list):
             raise GammaValidationError("Gamma list response must be a list")
         if not response:

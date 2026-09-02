@@ -97,7 +97,7 @@ async def _run_engine(settings: Settings) -> int:
         gamma = GammaClient(settings.gamma_url, get_json)
 
         async def settlement_fetcher(market: Any) -> Any:
-            return await gamma.get_market_by_slug(market.slug)
+            return await gamma.get_market_by_slug(market.slug, include_closed=True)
 
         engine = PaperEngine(
             settings,

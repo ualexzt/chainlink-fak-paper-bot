@@ -242,6 +242,16 @@ class GammaClientTests(unittest.TestCase):
             self._run(client.get_market_by_slug("btc-updown-5m-1788251700"))
         with self.assertRaises(GammaValidationError):
             self._run(client.get_market_by_slug("btc-updown-5m-1788252000"))
+        self.assertEqual(
+            self._run(client.get_market_by_slug(
+                "btc-updown-5m-1788251100", include_closed=True,
+            )),
+            clone_market(),
+        )
+        with self.assertRaises(GammaValidationError):
+            self._run(client.get_market_by_slug(
+                "btc-updown-5m-1788251100", include_closed=1,  # type: ignore[arg-type]
+            ))
 
         self.assertEqual(
             calls,
@@ -251,6 +261,9 @@ class GammaClientTests(unittest.TestCase):
                 ("https://gamma-api.polymarket.com/markets", {"slug": "btc-updown-5m-1788251400"}),
                 ("https://gamma-api.polymarket.com/markets", {"slug": "btc-updown-5m-1788251700"}),
                 ("https://gamma-api.polymarket.com/markets", {"slug": "btc-updown-5m-1788252000"}),
+                ("https://gamma-api.polymarket.com/markets", {
+                    "slug": "btc-updown-5m-1788251100", "closed": "true",
+                }),
             ],
         )
         self.assertFalse(hasattr(client, "request"))

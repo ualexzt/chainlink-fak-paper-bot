@@ -87,9 +87,25 @@ class MarketParserTests(unittest.TestCase):
             ))
         self.assertEqual([str(level.price) for level in book.executable_asks()], ["0.81"])
 
+    def test_official_snapshot_array_is_parsed_in_order(self):
+        lines = FIXTURE.read_text().splitlines()
+        raw = json.dumps([json.loads(lines[0]), json.loads(lines[2])])
+        snapshots = parse_market_message(raw, sequence=5000)
+        self.assertEqual(len(snapshots), 2)
+        self.assertTrue(all(isinstance(item, MarketSnapshot) for item in snapshots))
+        self.assertEqual(
+            [(item.token_id, item.sequence) for item in snapshots],
+            [("up-token", 5000), ("down-token", 5001)],
+        )
+
+    def test_snapshot_array_with_malformed_member_fails_closed(self):
+        lines = FIXTURE.read_text().splitlines()
+        raw = json.dumps([json.loads(lines[0]), {"event_type": "book"}])
+        self.assertEqual(parse_market_message(raw, sequence=1), ())
+
     def test_malformed_unknown_and_nonofficial_single_delta_fail_closed(self):
         cases = (
-            "not-json", "PONG", "[]", "{}",
+            "not-json", "PONG", "[]", "[1]", "{}",
             '{"event_type":"last_trade_price","timestamp":"1","asset_id":"u"}',
             '{"event_type":"price_change","timestamp":"1","price_changes":[{"asset_id":"u","price":"NaN","size":"1","side":"BUY"}]}',
             '{"asset_id":"u","side":"ask","price":"0.5","size":"1","timestamp":"1"}',
