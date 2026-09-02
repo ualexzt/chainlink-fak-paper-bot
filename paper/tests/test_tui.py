@@ -115,8 +115,8 @@ class DashboardTests(unittest.TestCase):
         self.storage.close()
         self.tmp.cleanup()
 
-    def rendered(self, **filters: str) -> str:
-        dashboard = PaperDashboard(self.path, clock_s=lambda: 1_200, **filters)
+    def rendered(self, *, clock_s: int = 1_200, **filters: str) -> str:
+        dashboard = PaperDashboard(self.path, clock_s=lambda: clock_s, **filters)
         console = Console(record=True, width=300, height=200, file=io.StringIO())
         console.print(dashboard.render())
         output = console.export_text()
@@ -128,11 +128,19 @@ class DashboardTests(unittest.TestCase):
         for expected in (
             "PAPER ONLY · NO ORDERS", "OVERVIEW", "Market pulse", "BTC", "SOL", "UP bid / ask",
             "CL leader", "Our signals", "observational", "BASE ONLY UP",
-            "Open paper inventory", "virtual fills only", "System state", "market books",
+            "Open paper inventory", "round UTC", "ACTIVE POSITION", "virtual fills only",
+            "System state", "market books",
             "Chainlink resolver", "database", "disk / journal",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, output)
+
+    def test_closed_unsettled_inventory_is_clearly_labelled(self) -> None:
+        output = self.rendered(clock_s=1_400)
+        self.assertIn("AWAITING SETTLEMENT", output)
+        self.assertIn("closed 01:40 ago", output)
+        self.assertIn("#btc-market", output)
+        self.assertNotIn("ACTIVE POSITION", output)
 
     def test_lane_and_asset_filters_are_applied(self) -> None:
         output = self.rendered(

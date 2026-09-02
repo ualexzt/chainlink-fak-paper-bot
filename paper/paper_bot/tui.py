@@ -6,6 +6,7 @@ import json
 import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -142,6 +143,7 @@ class PaperDashboard:
             "WAIT": "dim", "BASE ONLY": "yellow", "MC ONLY": "cyan",
             "CONFLICT": "bold red", "STALE": "yellow", "WARN": "yellow",
             "BLOCKED": "bold red", "CRITICAL": "bold red", "EVENT": "dim cyan",
+            "ACTIVE POSITION": "bold green", "AWAITING SETTLEMENT": "bold yellow",
         }
         return Text(label, style=styles.get(state, "white"))
 
@@ -288,31 +290,40 @@ class PaperDashboard:
         return rows
 
     def _position_summary_rows(
-        self, data: DashboardReadModel, symbols: Mapping[str, str], snapshot: Mapping[str, Any]
+        self, data: DashboardReadModel, symbols: Mapping[str, str]
     ) -> list[tuple[Any, ...]]:
         now_s = int(self._clock_s())
-        market_views = {str(row.get("market_id")): row for row in snapshot.get("markets", ())}
         grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
         for lot in data.inventory:
             symbol = symbols.get(str(lot["market_id"]), "?")
             if self.asset is None or symbol == self.asset:
                 grouped[str(lot["market_id"])].append(lot)
-        rows = []
+        rows: list[tuple[int, str, tuple[Any, ...]]] = []
         for market_id, lots in grouped.items():
-            market = market_views.get(market_id, {})
-            remaining = int(market.get("close_ts", now_s)) - now_s
-            countdown = "settling" if remaining <= 0 else f"{remaining // 60:02d}:{remaining % 60:02d}"
+            mkt_ts, close_ts = int(lots[0]["mkt_ts"]), int(lots[0]["close_ts"])
+            remaining = close_ts - now_s
+            elapsed = abs(remaining)
+            timing = (
+                f"closes {elapsed // 60:02d}:{elapsed % 60:02d}" if remaining > 0
+                else f"closed {elapsed // 60:02d}:{elapsed % 60:02d} ago"
+            )
+            round_utc = (
+                f"{datetime.fromtimestamp(mkt_ts, UTC):%H:%M}–"
+                f"{datetime.fromtimestamp(close_ts, UTC):%H:%M}"
+            )
+            state = "ACTIVE POSITION" if remaining > 0 else "AWAITING SETTLEMENT"
             totals = {
                 side: sum((_decimal(lot["shares"]) for lot in lots if lot["side"] == side), ZERO)
                 for side in ("UP", "DOWN")
             }
             lane_count = len({(lot["threshold"], lot["confirmation"], lot["policy"]) for lot in lots})
-            rows.append((
-                symbols.get(market_id, "?").upper(), market_id, countdown, lane_count,
+            symbol = symbols.get(market_id, "?").upper()
+            rows.append((remaining, symbol, (
+                symbol, round_utc, f"#{market_id}", timing,
+                self._status(state, state), lane_count,
                 _fmt(totals["UP"], 2), _fmt(totals["DOWN"], 2),
-                self._status("OPEN PAPER", "LIVE"),
-            ))
-        return sorted(rows, key=lambda row: (row[2] == "settling", row[0]))[:4]
+            )))
+        return [row for _, _, row in sorted(rows, key=lambda item: (item[0] > 0, item[0], item[1]))[:4]]
 
     def _scoreboard_rows(self, data: DashboardReadModel, symbols: Mapping[str, str]) -> list[tuple[Any, ...]]:
         grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
@@ -451,8 +462,8 @@ class PaperDashboard:
                 self._signal_rows(data, snapshot), subtitle="observational · never sends orders",
             ))
             content["positions"].update(self._panel(
-                "Open paper inventory", ("asset", "market", "closes", "lanes", "UP shares", "DOWN shares", "state"),
-                self._position_summary_rows(data, symbols, snapshot), subtitle="virtual fills only",
+                "Open paper inventory", ("asset", "round UTC", "market", "timing", "state", "lanes", "UP", "DOWN"),
+                self._position_summary_rows(data, symbols), subtitle="virtual fills only",
             ))
             content["health"].update(self._panel(
                 "System state", ("component", "state", "current detail"), self._health_rows(data, snapshot),

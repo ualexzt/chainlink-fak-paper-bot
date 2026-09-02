@@ -45,6 +45,11 @@ evidence:
 
 These labels are observational paper signals. They never create an order or change engine state.
 
+`Open paper inventory` is position state, not a new signal. It shows the persisted
+UTC round and market ID. A row is labelled `ACTIVE POSITION` before market close
+and `AWAITING SETTLEMENT` afterward; it remains visible until an official Gamma
+outcome settles and closes the virtual lots.
+
 The container binds `paper/runtime` to `/data`. The database is `/data/paper.db`; raw journals are `/data/raw-journal/raw-events-YYYY-MM-DD.jsonl` and compressed closed-day archives. The runtime directory is intentionally excluded from the image and should be backed up independently.
 
 ## Configuration and experiment identity

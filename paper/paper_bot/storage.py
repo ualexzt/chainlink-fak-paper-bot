@@ -1065,11 +1065,13 @@ class Storage:
             " ORDER BY s.threshold,s.confirmation,s.policy,m.close_ts,s.market_id", args,
         ))
         inventory = tuple(dict(row) for row in db.execute(
-            """SELECT experiment_hash,market_id,threshold,confirmation,policy,
-                      token_id,side,shares,source
-               FROM inventory_lots WHERE open=1""" +
-            ("" if experiment_hash is None else " AND experiment_hash=?") +
-            " ORDER BY market_id,threshold,confirmation,policy,lot_id", args,
+            """SELECT i.experiment_hash,i.market_id,i.threshold,i.confirmation,i.policy,
+                      i.token_id,i.side,i.shares,i.source,m.mkt_ts,m.close_ts
+               FROM inventory_lots i
+               JOIN markets m ON m.experiment_hash=i.experiment_hash AND m.market_id=i.market_id
+               WHERE i.open=1""" +
+            ("" if experiment_hash is None else " AND i.experiment_hash=?") +
+            " ORDER BY i.market_id,i.threshold,i.confirmation,i.policy,i.lot_id", args,
         ))
         try:
             monte_carlo = tuple(dict(row) for row in db.execute(
