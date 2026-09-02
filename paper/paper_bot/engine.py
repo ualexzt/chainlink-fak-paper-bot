@@ -148,14 +148,33 @@ class PaperEngine:
             if not isinstance(market, MarketDefinition):
                 raise EngineInvariantError("Gamma returned an invalid market definition")
             existing = self.markets.get(market.market_id)
-            if existing is not None and existing != market:
-                raise EngineInvariantError("market definition changed")
+            if existing is not None and (
+                existing.symbol,
+                existing.slug,
+                existing.market_id,
+                existing.mkt_ts,
+                existing.end_ts,
+                existing.up_token_id,
+                existing.down_token_id,
+            ) != (
+                market.symbol,
+                market.slug,
+                market.market_id,
+                market.mkt_ts,
+                market.end_ts,
+                market.up_token_id,
+                market.down_token_id,
+            ):
+                raise EngineInvariantError("market identity changed")
             for token_id in (market.up_token_id, market.down_token_id):
                 owner = self._token_market.get(token_id)
                 if owner is not None and owner != market.market_id:
                     raise EngineInvariantError("token belongs to multiple markets")
                 self._token_market[token_id] = market.market_id
                 self.books.setdefault(token_id, OrderBook())
+            # Gamma can finalize tick/minimum/fee fields as a listed next market
+            # becomes current. Identity is immutable, but new simulations must
+            # use the latest validated execution parameters.
             self.markets[market.market_id] = market
             self.strategies.setdefault(market.market_id, self._strategy())
             self.positions.setdefault(market.market_id, {})

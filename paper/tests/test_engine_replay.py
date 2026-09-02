@@ -7,6 +7,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal as D
 from pathlib import Path
 from unittest.mock import Mock
@@ -14,7 +15,7 @@ from unittest.mock import Mock
 from paper_bot.config import load_settings
 from paper_bot.cli import main as cli_main
 from paper_bot.domain import BookLevel, FeeSchedule
-from paper_bot.engine import PaperEngine
+from paper_bot.engine import EngineInvariantError, PaperEngine
 from paper_bot.gamma import MarketDefinition
 from paper_bot.journal import RawJournal
 from paper_bot.market_ws import MarketDelta, MarketInvalidation, MarketSnapshot
@@ -495,6 +496,23 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(current.down_token_id, tokens)
         self.assertIn(upcoming.up_token_id, tokens)
         self.assertIn(upcoming.down_token_id, tokens)
+
+    async def test_discovery_refreshes_execution_fields_but_rejects_identity_changes(self):
+        definition = market()
+        engine = await self.make_engine((definition,))
+        refreshed = replace(
+            definition,
+            tick_size=D("0.001"),
+            min_order_shares=D("5"),
+            fee_schedule=FeeSchedule(D("0.07"), D("1")),
+        )
+        engine._register_markets((refreshed,))
+        self.assertEqual(engine.markets[definition.market_id], refreshed)
+        self.assertIs(engine.books[definition.up_token_id], engine.books[refreshed.up_token_id])
+
+        changed_identity = replace(refreshed, down_token_id="different-token")
+        with self.assertRaisesRegex(EngineInvariantError, "identity changed"):
+            engine._register_markets((changed_identity,))
 
     async def test_cli_is_public_only_and_read_only_commands_close_database(self):
         definition = market()
