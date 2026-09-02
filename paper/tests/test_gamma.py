@@ -303,6 +303,20 @@ class GammaClientTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             result.append(None)  # type: ignore[attr-defined]
 
+        calls.clear()
+        closed_result = self._run(client.discover_current_and_next(
+            ("btc",), 1788250899, include_closed=True,
+        ))
+        self.assertEqual(len(closed_result), 2)
+        self.assertEqual(calls, [
+            ("https://gamma-api.polymarket.com/markets", {
+                "slug": "btc-updown-5m-1788250800", "closed": "true",
+            }),
+            ("https://gamma-api.polymarket.com/markets", {
+                "slug": "btc-updown-5m-1788251100", "closed": "true",
+            }),
+        ])
+
     def test_discover_current_and_next_skips_none_and_fails_closed_on_mismatch(self):
         calls: list[tuple[str, dict[str, str]]] = []
         payloads = {

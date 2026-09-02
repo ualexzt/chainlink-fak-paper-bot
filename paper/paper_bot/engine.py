@@ -113,13 +113,15 @@ class PaperEngine:
         if foreign:
             raise EngineInvariantError("open state belongs to another experiment version")
 
-        discovery_times = {self._now_s()}
-        discovery_times.update(state.mkt_ts for state in restored)
-        discovered: list[MarketDefinition] = []
-        for at in sorted(discovery_times):
-            discovered.extend(await self.gamma.discover_current_and_next(self.settings.symbols, at))
-        by_id = {state.market_id: state for state in restored}
         now_s = self._now_s()
+        discovered = list(await self.gamma.discover_current_and_next(
+            self.settings.symbols, now_s,
+        ))
+        for at in sorted({state.mkt_ts for state in restored}):
+            discovered.extend(await self.gamma.discover_current_and_next(
+                self.settings.symbols, at, include_closed=True,
+            ))
+        by_id = {state.market_id: state for state in restored}
         self._register_markets(
             market for market in discovered
             if market.end_ts > now_s or market.market_id in by_id

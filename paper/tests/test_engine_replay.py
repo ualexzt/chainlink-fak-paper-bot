@@ -37,9 +37,12 @@ class FakeGamma:
         self.definitions = tuple(definitions)
         self.calls = []
 
-    async def discover_current_and_next(self, symbols, now):
-        self.calls.append((tuple(symbols), now))
-        return tuple(item for item in self.definitions if item.symbol in symbols)
+    async def discover_current_and_next(self, symbols, now, *, include_closed=False):
+        self.calls.append((tuple(symbols), now, include_closed))
+        return tuple(
+            item for item in self.definitions
+            if item.symbol in symbols and (item.end_ts > now or include_closed)
+        )
 
 
 class RecoveringGamma(FakeGamma):
@@ -47,11 +50,13 @@ class RecoveringGamma(FakeGamma):
         super().__init__(definitions)
         self.failures = 1
 
-    async def discover_current_and_next(self, symbols, now):
+    async def discover_current_and_next(self, symbols, now, *, include_closed=False):
         if self.failures:
             self.failures -= 1
             raise OSError("injected private discovery detail")
-        return await super().discover_current_and_next(symbols, now)
+        return await super().discover_current_and_next(
+            symbols, now, include_closed=include_closed,
+        )
 
 
 def snapshot(token, bids, asks, ts, sequence):
@@ -221,6 +226,24 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third.storage.db.execute(
             "SELECT COUNT(*) FROM signals WHERE phase='REVERSE'"
         ).fetchone()[0], 1)
+
+    async def test_restart_rediscovers_closed_market_before_settlement(self):
+        definition = market()
+        first = await self.make_engine(
+            (definition,), db_name="closed-restart.db", journal_name="closed-restart-raw",
+        )
+        await self.seed_books(first, definition)
+        await self.cross_up(first, definition)
+        first.storage.close()
+        first.journal.close()
+
+        self.now[0] = definition.end_ts + 60
+        self.now_ms[0] = self.now[0] * 1000
+        second = await self.make_engine(
+            (definition,), db_name="closed-restart.db", journal_name="closed-restart-raw",
+        )
+        self.assertEqual(len(second.positions[definition.market_id]), 3)
+        self.assertIn((self.settings.symbols, definition.mkt_ts, True), second.gamma.calls)
 
     async def test_successful_reverse_rescues_loss_and_hold_lanes_remain_losses(self):
         definition = market()

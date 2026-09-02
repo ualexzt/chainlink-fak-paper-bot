@@ -242,7 +242,11 @@ class GammaClient:
             raise GammaValidationError("Gamma market entry must be a mapping")
         return item
 
-    async def discover_current_and_next(self, symbols: Iterable[str], now: int) -> tuple[MarketDefinition, ...]:
+    async def discover_current_and_next(
+        self, symbols: Iterable[str], now: int, *, include_closed: bool = False,
+    ) -> tuple[MarketDefinition, ...]:
+        if not isinstance(include_closed, bool):
+            raise GammaValidationError("include_closed must be boolean")
         if isinstance(now, bool):
             raise GammaValidationError("now must be a nonnegative epoch second")
         now_decimal = _to_decimal(now, "now")
@@ -256,7 +260,7 @@ class GammaClient:
                 raise GammaValidationError("symbol must be one of btc, eth, sol")
             for mkt_ts in (aligned, aligned + 300):
                 slug = f"{symbol}-updown-5m-{mkt_ts}"
-                payload = await self.get_market_by_slug(slug)
+                payload = await self.get_market_by_slug(slug, include_closed=include_closed)
                 if payload is None:
                     continue
                 results.append(validate_market(payload, symbol, mkt_ts))
