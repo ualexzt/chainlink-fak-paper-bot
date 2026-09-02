@@ -275,7 +275,7 @@ class PaperDashboard:
                 payload = json.loads(row["payload_json"])
             except (TypeError, json.JSONDecodeError):
                 payload = {}
-            outcome = "NO TRADE" if row["decision"] != "ENTER" else (
+            outcome = "SKIP" if row["decision"] != "ENTER" else (
                 "—" if row["winner"] is None else
                 "WIN" if payload.get("side") == row["winner"] else "LOSS"
             )
@@ -472,7 +472,8 @@ class PaperDashboard:
             content.split_column(Layout(name="mc", ratio=2), Layout(name="health", ratio=1))
             content["mc"].update(self._panel(
                 "Monte Carlo decision log", ("asset", "window", "side", "ask", "P(win)", "break-even", "edge", "decision", "reason", "result"),
-                self._monte_carlo_rows(data, symbols), subtitle="newest first · persisted immutable observations",
+                self._monte_carlo_rows(data, symbols),
+                subtitle="newest first · SKIP means no paper trade",
             ))
             content["health"].update(self._panel(
                 "Feed and storage timeline", ("component", "state", "current detail"),

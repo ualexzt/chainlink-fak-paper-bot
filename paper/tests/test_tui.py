@@ -186,7 +186,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("0.95", output)
         self.assertIn("0.05", output)
 
-    def test_rejected_monte_carlo_observation_is_not_rendered_as_a_loss(self) -> None:
+    def test_rejected_monte_carlo_observation_is_rendered_as_skipped_not_loss(self) -> None:
         storage = Storage(self.path)
         storage.initialize()
         self.assertEqual(storage.ensure_experiment(self.settings), self.experiment_hash)
@@ -204,7 +204,8 @@ class DashboardTests(unittest.TestCase):
 
         output = self.rendered(view="activity")
         self.assertIn("REJECT", output)
-        self.assertIn("NO TRADE", output)
+        self.assertIn("SKIP", output)
+        self.assertIn("SKIP means no paper trade", output)
         self.assertNotIn("LOSS", output)
 
     def test_uses_mode_ro_and_write_attempt_fails(self) -> None:
