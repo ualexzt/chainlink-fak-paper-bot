@@ -12,7 +12,7 @@ from .gamma import MarketDefinition
 from .resolver import ResolverState
 from .strategy import Confirmation, LaneKey, PositionPolicy, StrategyEvent
 
-MODEL_VERSION = "twap-block-bootstrap-v1"
+MODEL_VERSION = "twap-segmented-block-bootstrap-v2"
 HORIZONS = (90, 60, 30)
 ENTRY_FLOOR = Decimal("0.85")
 ENTRY_CEILING = Decimal("0.90")
@@ -23,9 +23,9 @@ BLOCK_SIZE = 5
 PROBABILITY_QUANTUM = Decimal("0.0001")
 
 _CONFIRMATION_BY_HORIZON = {
-    90: Confirmation.MC_BOOTSTRAP_90_V1,
-    60: Confirmation.MC_BOOTSTRAP_60_V1,
-    30: Confirmation.MC_BOOTSTRAP_30_V1,
+    90: Confirmation.MC_BOOTSTRAP_90_V2,
+    60: Confirmation.MC_BOOTSTRAP_60_V2,
+    30: Confirmation.MC_BOOTSTRAP_30_V2,
 }
 
 
@@ -129,34 +129,32 @@ def _bootstrap_probability(
     intervals = [history[index][0] - history[index - 1][0] for index in range(1, len(history))]
     if any(interval <= 0 for interval in intervals):
         raise ValueError("history_not_monotonic")
-    ordered_intervals = sorted(intervals)
+    # RTDS normally updates every 1-2 seconds. A wider interval is a feed gap,
+    # not a price return; a data set dominated by gaps must not redefine its
+    # own expected cadence and accidentally admit them.
+    continuity_limit_ms = 3_000
+    segments: list[list[Decimal]] = [[]]
+    valid_intervals: list[int] = []
+    for index, interval in enumerate(intervals, start=1):
+        if interval > continuity_limit_ms:
+            segments.append([])
+            continue
+        valid_intervals.append(interval)
+        segments[-1].append(history[index][1] / history[index - 1][1] - Decimal("1"))
+    returns = [change for segment in segments for change in segment]
+    if len(returns) < MIN_HISTORY_POINTS - 1:
+        raise ValueError("continuous_history_insufficient")
+    ordered_intervals = sorted(valid_intervals)
     interval_ms = ordered_intervals[len(ordered_intervals) // 2]
-    continuity_limit_ms = max(3_000, interval_ms * 3)
-    last_gap = max(
-        (index for index, interval in enumerate(intervals) if interval > continuity_limit_ms),
-        default=-1,
-    )
-    if last_gap >= 0:
-        history = history[last_gap + 1:]
-        if len(history) < MIN_HISTORY_POINTS:
-            raise ValueError("continuous_history_insufficient")
-        intervals = [
-            history[index][0] - history[index - 1][0] for index in range(1, len(history))
-        ]
-        ordered_intervals = sorted(intervals)
-        interval_ms = ordered_intervals[len(ordered_intervals) // 2]
     steps = max(1, (seconds_to_close * 1000 + interval_ms - 1) // interval_ms)
 
-    returns = [
-        history[index][1] / history[index - 1][1] - Decimal("1")
-        for index in range(1, len(history))
-    ]
-    if len(returns) < BLOCK_SIZE:
-        raise ValueError("history_insufficient")
     blocks = tuple(
-        tuple(returns[index:index + BLOCK_SIZE])
-        for index in range(len(returns) - BLOCK_SIZE + 1)
+        tuple(segment[index:index + BLOCK_SIZE])
+        for segment in segments
+        for index in range(len(segment) - BLOCK_SIZE + 1)
     )
+    if not blocks:
+        raise ValueError("continuous_block_history_insufficient")
     recent = returns[-30:]
     signs = [1 if value > 0 else -1 if value < 0 else 0 for value in recent]
     nonzero = [value for value in signs if value]
@@ -183,7 +181,7 @@ def _bootstrap_probability(
     probability = (Decimal(wins) / Decimal(SIMULATIONS)).quantize(
         PROBABILITY_QUANTUM, rounding=ROUND_HALF_UP
     )
-    return probability, sign_flips, mean_abs_step_bps, len(history)
+    return probability, sign_flips, mean_abs_step_bps, len(returns) + 1
 
 
 class MonteCarloShadowState:

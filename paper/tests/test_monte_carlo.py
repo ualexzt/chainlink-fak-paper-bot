@@ -30,9 +30,12 @@ class MonteCarloTests(unittest.TestCase):
                 [BookLevel(D(bid), D("20"))], [BookLevel(D(ask), D("20"))], 1, 1
             )
         self.resolver = ResolverState(("btc",))
-        for index in range(40):
-            ts = 1_000_000 + index * 5_500
-            self.assertTrue(self.resolver.accept("btc", D("100") + D(index) / D("100"), ts, ts))
+        observations = [(1_000_000, D("100"))] + [
+            (1_176_000 + index * 1_000, D("100.01") + D(index) / D("100"))
+            for index in range(39)
+        ]
+        for ts, value in observations:
+            self.assertTrue(self.resolver.accept("btc", value, ts, ts))
 
     def test_bootstrap_is_deterministic_and_uses_only_supplied_history(self):
         history = self.resolver.history("btc")
@@ -46,17 +49,26 @@ class MonteCarloTests(unittest.TestCase):
         )
         self.assertEqual(first, second)
         self.assertEqual(first[0], D("1.0000"))
-        self.assertEqual(first[3], 40)
+        self.assertEqual(first[3], 39)
 
-    def test_feed_gap_requires_new_contiguous_history(self):
+    def test_feed_gap_is_never_converted_into_a_return(self):
         history = self.resolver.history("btc")
         gapped = history[:35] + tuple(
             (timestamp + 120_000, value) for timestamp, value in history[35:]
         )
+        result = _bootstrap_probability(
+            gapped, start=D("100"), current=gapped[-1][1], side="UP",
+            seconds_to_close=60, seed_material="gap",
+        )
+        self.assertEqual(result[0], D("1.0000"))
+        self.assertEqual(result[3], 38)
+
+    def test_too_few_non_gap_returns_remains_fail_closed(self):
+        history = tuple((1_000_000 + index * 120_000, D("100") + D(index)) for index in range(30))
         with self.assertRaisesRegex(ValueError, "continuous_history_insufficient"):
             _bootstrap_probability(
-                gapped, start=D("100"), current=gapped[-1][1], side="UP",
-                seconds_to_close=60, seed_material="gap",
+                history, start=D("100"), current=history[-1][1], side="UP",
+                seconds_to_close=60, seed_material="all-gaps",
             )
 
     def test_90_second_lane_enters_only_with_fee_adjusted_edge(self):
@@ -70,7 +82,7 @@ class MonteCarloTests(unittest.TestCase):
         self.assertEqual(forecast.horizon_seconds, 90)
         self.assertEqual(forecast.decision, "ENTER")
         self.assertEqual(forecast.break_even_probability, D("0.8500"))
-        self.assertEqual(entry.lane.confirmation, Confirmation.MC_BOOTSTRAP_90_V1)
+        self.assertEqual(entry.lane.confirmation, Confirmation.MC_BOOTSTRAP_90_V2)
         self.assertEqual(entry.fak.status, "full")
         self.assertEqual(state.on_event(self.market, self.books, self.resolver, 1_215_000, 1_215), ())
 

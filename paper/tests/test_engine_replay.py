@@ -583,11 +583,14 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
             (definition,), db_name="monte-carlo.db", settlement_fetcher=fetch
         )
         await self.seed_books(engine, definition, up_ask="0.85", down_ask="0.15")
-        for index in range(40):
-            timestamp = definition.mkt_ts * 1000 + index * 5_500
+        observations = [(definition.mkt_ts * 1000, D("100"))] + [
+            (definition.mkt_ts * 1000 + 176_000 + index * 1_000,
+             D("100.01") + D(index) / D("100"))
+            for index in range(39)
+        ]
+        for timestamp, value in observations:
             self.now_ms[0] = timestamp
             self.now[0] = (timestamp + 999) // 1000
-            value = D("100") + D(index) / D("100")
             await engine.process_resolver_event(ResolverObservation(
                 "btc", value, timestamp, timestamp,
                 {"topic": "crypto_prices_twap_sixty", "type": "update", "payload": {
@@ -602,7 +605,7 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         confirmation = engine.storage.db.execute(
             "SELECT confirmation FROM signals WHERE confirmation LIKE 'MC_%'"
         ).fetchone()[0]
-        self.assertEqual(confirmation, "MC_BOOTSTRAP_90_V1")
+        self.assertEqual(confirmation, "MC_BOOTSTRAP_90_V2")
         engine.storage.close()
         engine.journal.close()
         restarted = await self.make_engine(
@@ -611,13 +614,13 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             {lane.confirmation.value for lane in restarted.positions[definition.market_id]},
-            {"MC_BOOTSTRAP_90_V1"},
+            {"MC_BOOTSTRAP_90_V2"},
         )
         self.now[0] = definition.end_ts + 1
         self.now_ms[0] = self.now[0] * 1000
         await restarted.reconcile_settlements()
         result = restarted.storage.db.execute(
-            "SELECT net_pnl FROM lane_results WHERE confirmation='MC_BOOTSTRAP_90_V1'"
+            "SELECT net_pnl FROM lane_results WHERE confirmation='MC_BOOTSTRAP_90_V2'"
         ).fetchone()
         self.assertIsNotNone(result)
         self.assertGreater(D(result[0]), D("0"))

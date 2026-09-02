@@ -61,6 +61,7 @@ class PaperDashboard:
         if confirmation is not None and confirmation not in {
             "BOOK_ONLY", "CHAINLINK_DIRECTION", "CHAINLINK_CONFIRMED",
             "MC_BOOTSTRAP_90_V1", "MC_BOOTSTRAP_60_V1", "MC_BOOTSTRAP_30_V1",
+            "MC_BOOTSTRAP_90_V2", "MC_BOOTSTRAP_60_V2", "MC_BOOTSTRAP_30_V2",
         }:
             raise ValueError("confirmation filter is invalid")
         if policy is not None and policy not in {"HOLD", "IMMEDIATE_REVERSE", "CHAINLINK_REVERSE"}:
