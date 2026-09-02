@@ -531,8 +531,18 @@ class PaperEngine:
         now_s = self._now_s()
         for market in tuple(self.markets.values()):
             positions = self.positions[market.market_id]
+            if market.market_id in self._settled or market.end_ts > now_s:
+                continue
+            now_ms = self._now_ms()
+            expiration_events = self.monte_carlo_strategies[market.market_id].on_event(
+                market, self._book_mapping(market), self.resolver, now_ms, now_s, now_ms,
+            )
+            if expiration_events:
+                if not await self._persist_events(expiration_events):
+                    return
+                self._adopt_events(market, expiration_events)
             observed = self.monte_carlo_strategies[market.market_id].has_observations
-            if market.market_id in self._settled or market.end_ts > now_s or not (positions or observed):
+            if not (positions or observed):
                 continue
             payload = await self.settlement_fetcher(market)
             if isinstance(payload, OfficialSettlement):

@@ -103,6 +103,10 @@ class MonteCarloTests(unittest.TestCase):
         self.assertEqual(events[0].horizon_seconds, 90)
         self.assertEqual(events[0].decision, "REJECT")
         self.assertEqual(events[0].reason, "window_no_valid_snapshot_resolver_stale")
+        close = state.on_event(self.market, self.books, self.resolver, 1_301_000, 1_301)
+        self.assertEqual([event.horizon_seconds for event in close], [60, 30])
+        self.assertEqual(close[0].decision, "REJECT")
+        self.assertEqual(close[1].decision, "MISSED")
 
     def test_late_start_records_missed_windows_then_waits_in_current_lane(self):
         state = MonteCarloShadowState(paper_notional_usd=D("5"), config_hash="c" * 64)

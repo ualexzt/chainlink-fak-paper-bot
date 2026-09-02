@@ -248,7 +248,7 @@ class MonteCarloShadowState:
         if isinstance(now_ms, bool) or not isinstance(now_ms, int) or now_ms < 0:
             raise ValueError("now_ms must be a nonnegative integer")
         seconds_to_close = market.end_ts - now_ts
-        if seconds_to_close <= 0 or seconds_to_close > HORIZONS[0]:
+        if seconds_to_close > HORIZONS[0]:
             return ()
 
         output: list[MonteCarloForecastEvent | StrategyEvent] = []
@@ -296,7 +296,7 @@ class MonteCarloShadowState:
             market_id=market.market_id,
             mkt_ts=market.mkt_ts,
             horizon_seconds=horizon,
-            seconds_to_close=seconds_to_close,
+            seconds_to_close=max(0, seconds_to_close),
             event_ts_ms=event_ts_ms,
         )
         try:
@@ -436,7 +436,7 @@ class MonteCarloShadowState:
             market_id=market.market_id,
             mkt_ts=market.mkt_ts,
             horizon_seconds=horizon,
-            seconds_to_close=seconds_to_close,
+            seconds_to_close=max(0, seconds_to_close),
             event_ts_ms=event_ts_ms,
             observation_ts_ms=None,
             side=None,
