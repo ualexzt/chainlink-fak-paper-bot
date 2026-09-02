@@ -108,8 +108,8 @@ class PaperDashboard:
     def _panel(title: str, columns: tuple[str, ...], rows: list[tuple[Any, ...]], *,
                subtitle: str | None = None) -> Panel:
         table = Table(expand=True, box=None, padding=(0, 1), header_style="bold bright_cyan")
-        for index, column in enumerate(columns):
-            table.add_column(column, overflow="ellipsis", no_wrap=index != len(columns) - 1)
+        for column in columns:
+            table.add_column(column, overflow="ellipsis", no_wrap=True)
         for row in rows or [("—",) * len(columns)]:
             table.add_row(*(value if isinstance(value, Text) else str(value) for value in row))
         return Panel(
