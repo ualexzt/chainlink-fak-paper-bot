@@ -217,6 +217,33 @@ class GammaValidationTests(unittest.TestCase):
 
 
 class GammaClientTests(unittest.TestCase):
+    def test_get_market_by_id_and_definition_use_exact_identity(self):
+        calls: list[tuple[str, dict[str, str]]] = []
+        payload = clone_market()
+
+        async def get_json(url: str, params: dict[str, str]) -> Any:
+            calls.append((url, params.copy()))
+            return payload
+
+        client = GammaClient("https://gamma-api.polymarket.com", get_json)
+        self.assertEqual(self._run(client.get_market_by_id(payload["id"])), payload)
+        definition = self._run(client.get_market_definition_by_id(
+            payload["id"], ("btc", "eth", "sol"), BTC_CURRENT,
+        ))
+        self.assertEqual((definition.market_id, definition.symbol), (payload["id"], "btc"))
+        self.assertEqual(calls, [
+            (f"https://gamma-api.polymarket.com/markets/{payload['id']}", {}),
+            (f"https://gamma-api.polymarket.com/markets/{payload['id']}", {}),
+        ])
+
+        payload["id"] = "different"
+        with self.assertRaises(GammaValidationError):
+            self._run(client.get_market_by_id("expected"))
+        with self.assertRaises(GammaValidationError):
+            self._run(client.get_market_definition_by_id(
+                "different", ("eth", "sol"), BTC_CURRENT,
+            ))
+
     def test_get_market_by_slug_enforces_official_list_response_shape_and_none_behavior(self):
         calls: list[tuple[str, dict[str, str]]] = []
 

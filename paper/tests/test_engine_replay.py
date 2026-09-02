@@ -37,6 +37,7 @@ class FakeGamma:
     def __init__(self, definitions):
         self.definitions = tuple(definitions)
         self.calls = []
+        self.definition_calls = []
 
     async def discover_current_and_next(self, symbols, now, *, include_closed=False):
         self.calls.append((tuple(symbols), now, include_closed))
@@ -44,6 +45,16 @@ class FakeGamma:
             item for item in self.definitions
             if item.symbol in symbols and (item.end_ts > now or include_closed)
         )
+
+    async def get_market_definition_by_id(self, market_id, symbols, mkt_ts):
+        self.definition_calls.append((market_id, tuple(symbols), mkt_ts))
+        matches = tuple(
+            item for item in self.definitions
+            if item.market_id == market_id and item.symbol in symbols and item.mkt_ts == mkt_ts
+        )
+        if len(matches) != 1:
+            raise ValueError("persisted market identity unavailable")
+        return matches[0]
 
 
 class RecoveringGamma(FakeGamma):
@@ -244,7 +255,10 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
             (definition,), db_name="closed-restart.db", journal_name="closed-restart-raw",
         )
         self.assertEqual(len(second.positions[definition.market_id]), 3)
-        self.assertIn((self.settings.symbols, definition.mkt_ts, True), second.gamma.calls)
+        self.assertIn(
+            (definition.market_id, self.settings.symbols, definition.mkt_ts),
+            second.gamma.definition_calls,
+        )
 
     async def test_successful_reverse_rescues_loss_and_hold_lanes_remain_losses(self):
         definition = market()

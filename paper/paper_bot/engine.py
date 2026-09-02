@@ -117,9 +117,9 @@ class PaperEngine:
         discovered = list(await self.gamma.discover_current_and_next(
             self.settings.symbols, now_s,
         ))
-        for at in sorted({state.mkt_ts for state in restored}):
-            discovered.extend(await self.gamma.discover_current_and_next(
-                self.settings.symbols, at, include_closed=True,
+        for state in restored:
+            discovered.append(await self.gamma.get_market_definition_by_id(
+                state.market_id, self.settings.symbols, state.mkt_ts,
             ))
         by_id = {state.market_id: state for state in restored}
         self._register_markets(

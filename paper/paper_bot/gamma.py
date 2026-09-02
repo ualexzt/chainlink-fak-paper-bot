@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable
+from urllib.parse import quote
 
 from .domain import FeeSchedule
 
@@ -241,6 +242,30 @@ class GammaClient:
         if not isinstance(item, Mapping):
             raise GammaValidationError("Gamma market entry must be a mapping")
         return item
+
+    async def get_market_by_id(self, market_id: str) -> Mapping[str, Any]:
+        if not isinstance(market_id, str) or not market_id:
+            raise GammaValidationError("market_id must be a nonempty string")
+        response = await self.get_json(
+            self.base_url.rstrip("/") + "/markets/" + quote(market_id, safe=""), {}
+        )
+        if not isinstance(response, Mapping):
+            raise GammaValidationError("Gamma market response must be a mapping")
+        if response.get("id") != market_id:
+            raise GammaValidationError("Gamma market id mismatch")
+        return response
+
+    async def get_market_definition_by_id(
+        self, market_id: str, symbols: Iterable[str], mkt_ts: int,
+    ) -> MarketDefinition:
+        payload = await self.get_market_by_id(market_id)
+        matching = tuple(
+            symbol for symbol in symbols
+            if payload.get("slug") == f"{symbol}-updown-5m-{mkt_ts}"
+        )
+        if len(matching) != 1:
+            raise GammaValidationError("Gamma market symbol identity mismatch")
+        return validate_market(payload, matching[0], mkt_ts)
 
     async def discover_current_and_next(
         self, symbols: Iterable[str], now: int, *, include_closed: bool = False,
