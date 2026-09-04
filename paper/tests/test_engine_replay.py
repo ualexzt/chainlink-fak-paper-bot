@@ -110,7 +110,9 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.settings = load_settings({"DATA_DIR": str(self.root)})
+        self.settings = load_settings({
+            "DATA_DIR": str(self.root), "QUALITY_SHADOW_ONLY": "false",
+        })
         self.now = [1100]
         self.now_ms = [1_100_000]
         self.resources = []
@@ -624,6 +626,121 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         ).fetchone()
         self.assertIsNotNone(result)
         self.assertGreater(D(result[0]), D("0"))
+
+    async def test_quality_shadow_only_records_compact_causal_cycle_without_legacy_rows(self):
+        definition = market()
+
+        async def fetch(_definition):
+            return settlement_payload(definition, "DOWN")
+
+        self.settings = replace(self.settings, quality_shadow_only=True)
+        self.now[0] = definition.mkt_ts + 30
+        self.now_ms[0] = self.now[0] * 1000
+        engine = await self.make_engine(
+            (definition,), db_name="quality.db", journal_name="quality", settlement_fetcher=fetch,
+        )
+        await engine.process_market_event(snapshot(
+            definition.up_token_id, (("0.63", "20"),), (("0.64", "20"),),
+            self.now_ms[0], 1,
+        ))
+        await engine.process_market_event(snapshot(
+            definition.down_token_id, (("0.36", "20"),), (("0.37", "20"),),
+            self.now_ms[0], 1,
+        ))
+        engine._sample_quality_shadow(self.now[0], self.now_ms[0])
+        engine._sample_quality_shadow(self.now[0], self.now_ms[0])
+
+        await engine.process_market_event(snapshot(
+            definition.up_token_id, (("0.89", "20"),), (("0.90", "20"),),
+            self.now_ms[0] + 1_000, 2,
+        ))
+        await engine.process_market_event(snapshot(
+            definition.down_token_id, (("0.10", "20"),), (("0.11", "20"),),
+            self.now_ms[0] + 1_000, 2,
+        ))
+        for age in range(31, 121):
+            self.now[0] = definition.mkt_ts + age
+            self.now_ms[0] = self.now[0] * 1000
+            engine._sample_quality_shadow(self.now[0], self.now_ms[0])
+
+        state = engine.quality_states[definition.market_id]
+        self.assertEqual((state.stage, state.selected_side, state.entry_ask),
+                         ("ENTERED", "UP", D("0.90")))
+        snapshot_payload = engine._dashboard_payload()
+        self.assertEqual(snapshot_payload["mode"], "QUALITY_SHADOW_ONLY")
+        self.assertEqual(snapshot_payload["quality_shadow"][0]["stage"], "ENTERED")
+
+        await engine.process_market_event(snapshot(
+            definition.up_token_id, (("0.69", "20"),), (("0.90", "20"),),
+            self.now_ms[0] + 1_000, 3,
+        ))
+        for age in range(121, 124):
+            self.now[0] = definition.mkt_ts + age
+            self.now_ms[0] = self.now[0] * 1000
+            engine._sample_quality_shadow(self.now[0], self.now_ms[0])
+        await engine.process_market_event(snapshot(
+            definition.up_token_id, (("0.68", "20"),), (("0.70", "20"),),
+            self.now_ms[0] + 1_000, 4,
+        ))
+        await engine.process_market_event(snapshot(
+            definition.down_token_id, (("0.30", "20"),), (("0.31", "20"),),
+            self.now_ms[0] + 1_000, 3,
+        ))
+        self.now[0] = definition.mkt_ts + 124
+        self.now_ms[0] = self.now[0] * 1000
+        engine._sample_quality_shadow(self.now[0], self.now_ms[0])
+        self.assertEqual(state.stage, "ENTERED", "engine swaps state objects transactionally")
+        state = engine.quality_states[definition.market_id]
+        self.assertEqual((state.stage, state.switch_age), ("SWITCHED", 124))
+
+        self.now[0] = definition.end_ts + 1
+        self.now_ms[0] = self.now[0] * 1000
+        await engine.reconcile_settlements()
+        self.assertEqual(engine.quality_states[definition.market_id].stage, "SETTLED")
+        for table in ("signals", "paper_orders", "monte_carlo_forecasts", "settlements"):
+            self.assertEqual(engine.storage.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+
+        rows = []
+        for path in sorted((self.root / "quality").glob("*.jsonl")):
+            rows.extend(json.loads(line) for line in path.read_text().splitlines())
+        event_types = [row["payload"]["event_type"] for row in rows]
+        self.assertEqual(event_types.count("quality_second"), 95)
+        self.assertEqual(event_types.count("quality_candidate"), 1)
+        self.assertEqual(event_types.count("quality_entry"), 1)
+        self.assertEqual(event_types.count("quality_switch_armed"), 1)
+        self.assertEqual(event_types.count("quality_switch"), 1)
+        self.assertEqual(event_types.count("quality_settlement"), 1)
+        self.assertEqual({row["source"] for row in rows}, {"quality_shadow"})
+
+    async def test_quality_shadow_candidate_restores_without_replaying_age_30(self):
+        definition = market()
+        self.settings = replace(self.settings, quality_shadow_only=True)
+        self.now[0] = definition.mkt_ts + 30
+        self.now_ms[0] = self.now[0] * 1000
+        engine = await self.make_engine(
+            (definition,), db_name="quality-restart.db", journal_name="quality-before-restart",
+        )
+        await engine.process_market_event(snapshot(
+            definition.up_token_id, (("0.63", "20"),), (("0.64", "20"),),
+            self.now_ms[0], 1,
+        ))
+        await engine.process_market_event(snapshot(
+            definition.down_token_id, (("0.36", "20"),), (("0.37", "20"),),
+            self.now_ms[0], 1,
+        ))
+        engine._sample_quality_shadow(self.now[0], self.now_ms[0])
+        engine._write_dashboard_snapshot()
+        engine.storage.close()
+        engine.journal.close()
+
+        restarted = await self.make_engine(
+            (definition,), db_name="quality-restart.db", journal_name="quality-after-restart",
+        )
+        restored = restarted.quality_states[definition.market_id]
+        self.assertEqual((restored.stage, restored.last_age, restored.last_recorded_age),
+                         ("CANDIDATE", 30, 30))
+        restarted._sample_quality_shadow(self.now[0], self.now_ms[0])
+        self.assertFalse(tuple((self.root / "quality-after-restart").glob("*.jsonl")))
 
     async def test_transient_dashboard_write_failure_gates_then_recovers(self):
         engine = await self.make_engine((market(),), db_name="dashboard-retry.db")

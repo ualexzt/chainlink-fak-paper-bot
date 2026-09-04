@@ -15,6 +15,7 @@ from .storage import Storage
 
 _PUBLIC_SETTING_NAMES = {
     "SYMBOLS", "ENTRY_THRESHOLDS", "PAPER_NOTIONAL_USD", "RTDS_STALE_SEC", "DATA_DIR",
+    "QUALITY_SHADOW_ONLY",
 }
 
 

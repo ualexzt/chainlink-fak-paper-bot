@@ -10,6 +10,15 @@ The original 36 lanes remain fixed: four price thresholds times three Chainlink 
 
 New virtual entries are fail-closed when the journal, database, dashboard snapshot, discovery, or processing health is critical. Open positions are retained through disconnects and are settled only from final official Gamma `outcomePrices`; provisional or inferred values are not settlement evidence.
 
+By default `QUALITY_SHADOW_ONLY=true` disables all legacy paper-entry lanes and the
+high-volume raw feed journal. The engine records one compact causal top-of-book row
+per market second and observes only the forward-validation rule selected on the
+frozen historical cohort: an unambiguous `ask >= 0.60` side at age 30, the two
+warning filters through ages 90/120, entry eligibility at age 120 with
+`ask >= 0.88`, and at most one full-switch repair after a three-second `0.20` bid
+drawdown (trigger no later than age 240, execution on the next observed second).
+These are observational paper actions only; no venue order is constructed or sent.
+
 ## Local operation
 
 From the repository root:

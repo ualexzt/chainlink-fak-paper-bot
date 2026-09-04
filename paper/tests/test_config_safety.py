@@ -19,6 +19,12 @@ class ConfigSafetyTests(unittest.TestCase):
         self.assertEqual(settings.thresholds, tuple(map(Decimal, ("0.80", "0.85", "0.89", "0.90"))))
         self.assertEqual(settings.paper_notional_usd, Decimal("5.00"))
         self.assertEqual(settings.rtds_stale_seconds, Decimal("10"))
+        self.assertTrue(settings.quality_shadow_only)
+
+    def test_quality_shadow_mode_is_explicit_and_fail_closed(self):
+        self.assertFalse(load_settings({"QUALITY_SHADOW_ONLY": "false"}).quality_shadow_only)
+        with self.assertRaisesRegex(ValueError, "QUALITY_SHADOW_ONLY"):
+            load_settings({"QUALITY_SHADOW_ONLY": "maybe"})
 
     def test_forbidden_credentials_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "forbidden credential"):
@@ -44,6 +50,7 @@ class PackagingRuntimeTests(unittest.TestCase):
             "ENTRY_THRESHOLDS=0.80,0.85,0.89,0.90",
             "PAPER_NOTIONAL_USD=5.00",
             "RTDS_STALE_SEC=10",
+            "QUALITY_SHADOW_ONLY=true",
             "DATA_DIR=/data",
             "LOG_LEVEL=INFO",
         ])
@@ -374,7 +381,7 @@ class PackagingSafetyTests(unittest.TestCase):
         env = self._read(".env.example")
         expected = {
             "SYMBOLS", "ENTRY_THRESHOLDS", "PAPER_NOTIONAL_USD", "RTDS_STALE_SEC",
-            "DATA_DIR", "LOG_LEVEL",
+            "QUALITY_SHADOW_ONLY", "DATA_DIR", "LOG_LEVEL",
         }
         keys = {line.split("=", 1)[0] for line in env.splitlines()
                 if line.strip() and not line.lstrip().startswith("#") and "=" in line}

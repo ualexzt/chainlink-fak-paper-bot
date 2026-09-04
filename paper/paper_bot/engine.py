@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -14,6 +15,7 @@ from .gamma import GammaClient, MarketDefinition
 from .journal import JournalError, RawEvent, RawJournal
 from .market_ws import MarketDelta, MarketInvalidation, MarketSnapshot, MarketWsClient
 from .monte_carlo import MonteCarloForecastEvent, MonteCarloShadowState
+from .quality_shadow import QualityBook, QualityShadowState
 from .resolver import ResolverState
 from .rtds import ResolverObservation, RtdsClient
 from .settlement import OfficialSettlement, parse_official_settlement
@@ -75,6 +77,7 @@ class PaperEngine:
         self.books: dict[str, OrderBook] = {}
         self.strategies: dict[str, MarketStrategyState] = {}
         self.monte_carlo_strategies: dict[str, MonteCarloShadowState] = {}
+        self.quality_states: dict[str, QualityShadowState] = {}
         self.positions: dict[str, dict[LaneKey, LanePosition]] = {}
         self._token_market: dict[str, str] = {}
         self._settled: set[str] = set()
@@ -133,6 +136,19 @@ class PaperEngine:
             raise EngineInvariantError("persisted market could not be rediscovered")
         for market_id, persisted in by_id.items():
             self._restore_market(persisted, self.markets[market_id])
+        previous_snapshot = self.storage.load_dashboard_snapshot()
+        if self.settings.quality_shadow_only and previous_snapshot is not None:
+            for payload in previous_snapshot.get("quality_shadow", ()):
+                if not isinstance(payload, Mapping):
+                    continue
+                restored_quality = QualityShadowState.restore(payload)
+                market = self.markets.get(restored_quality.market_id)
+                if market is None:
+                    continue
+                if (restored_quality.mkt_ts, restored_quality.symbol) != (market.mkt_ts, market.symbol):
+                    raise EngineInvariantError("quality shadow market identity changed")
+                if restored_quality.stage != "SETTLED":
+                    self.quality_states[market.market_id] = restored_quality
         self._initialized = True
         self._write_dashboard_snapshot()
 
@@ -189,6 +205,11 @@ class PaperEngine:
             self.monte_carlo_strategies.setdefault(
                 market.market_id, self._monte_carlo_strategy()
             )
+            if self.settings.quality_shadow_only:
+                self.quality_states.setdefault(
+                    market.market_id,
+                    QualityShadowState(market.market_id, market.mkt_ts, market.symbol),
+                )
             self.positions.setdefault(market.market_id, {})
         if self._running and self.token_ids() != before:
             self._subscriptions_changed.set()
@@ -280,6 +301,72 @@ class PaperEngine:
             market.down_token_id: self.books[market.down_token_id],
         }
 
+    def _sample_quality_shadow(self, now_s: int, now_ms: int) -> None:
+        """Persist one compact, replayable top-of-book row per active market second."""
+        for market_id, market in sorted(self.markets.items()):
+            age = now_s - market.mkt_ts
+            if market_id in self._inactive or not 0 <= age < 300:
+                continue
+            state = self.quality_states[market_id]
+            if state.last_recorded_age is not None and age <= state.last_recorded_age:
+                continue
+            public_books: dict[str, Any] = {}
+            strategy_books: dict[str, QualityBook] = {}
+            for side, token_id in (("UP", market.up_token_id), ("DOWN", market.down_token_id)):
+                book = self.books[token_id]
+                try:
+                    bids, asks = book.executable_bids(), book.executable_asks()
+                except InvalidBook:
+                    bids, asks = (), ()
+                if bids and asks:
+                    strategy_books[side] = QualityBook(bids[0].price, asks[0].price)
+                    public_books[side] = {
+                        "generation": book.generation,
+                        "best_bid": bids[0].price, "best_bid_shares": bids[0].shares,
+                        "best_ask": asks[0].price, "best_ask_shares": asks[0].shares,
+                        "bid_depth": sum((level.shares for level in bids), start=0),
+                        "ask_depth": sum((level.shares for level in asks), start=0),
+                    }
+            resolver_payload: dict[str, Any] | None = None
+            try:
+                view = self.resolver.view(market.symbol, market.mkt_ts, now_ms)
+            except (AttributeError, KeyError, ValueError):
+                pass
+            else:
+                resolver_payload = {
+                    "current": view.current, "start": view.start,
+                    "observation_ts_ms": view.observation_ts_ms, "age_ms": view.age_ms,
+                    "fresh": view.fresh, "distance": view.distance,
+                    "distance_bps": view.distance_bps, "leader": view.leader,
+                    "momentum_5s_bps": view.momentum_5s_bps,
+                }
+            complete = set(strategy_books) == {"UP", "DOWN"}
+            sample_payload = {
+                "event_type": "quality_second", "version": 1,
+                "market_id": market.market_id, "mkt_ts": market.mkt_ts,
+                "symbol": market.symbol, "age": age, "complete": complete,
+                "books": public_books, "resolver": resolver_payload,
+                "stage_before": state.stage,
+            }
+            next_state = copy.deepcopy(state)
+            events = next_state.sample(age, strategy_books) if complete else ()
+            next_state.mark_recorded(age)
+            try:
+                self.journal.append(RawEvent(
+                    source="quality_shadow", receive_ts_ms=now_ms,
+                    source_ts_ms=now_s * 1000, symbol=market.symbol,
+                    token_id=None, payload=sample_payload,
+                ))
+                for event in events:
+                    self.journal.append(RawEvent(
+                        source="quality_shadow", receive_ts_ms=now_ms,
+                        source_ts_ms=now_s * 1000, symbol=market.symbol,
+                        token_id=None, payload=event,
+                    ))
+            except (JournalError, OSError, TypeError, ValueError):
+                return
+            self.quality_states[market_id] = next_state
+
     def _dashboard_payload(self) -> dict[str, Any]:
         """Build a strictly public, Decimal-preserving view for TUI readers."""
         # ResolverState intentionally rejects epoch zero; test clocks and a
@@ -337,7 +424,13 @@ class PaperEngine:
                 break
         return {
             "version": 1, "experiment_hash": self.experiment_hash,
+            "mode": "QUALITY_SHADOW_ONLY" if self.settings.quality_shadow_only else "FULL_PAPER",
             "markets": markets, "resolver": resolver,
+            "quality_shadow": [
+                self.quality_states[market_id].snapshot()
+                for market_id in sorted(self.quality_states)
+                if market_id not in self._settled
+            ],
             "health": {
                 "storage": self.storage_critical_reason,
                 "dashboard": self.dashboard_critical_reason,
@@ -448,14 +541,14 @@ class PaperEngine:
         if isinstance(event, MarketDelta):
             batch_key = (market_id or event.token_id, event.event_ts_ms, event.batch_id)
             if event.batch_index == 0:
-                journaled = self._journal_market_event(event)
+                journaled = True if self.settings.quality_shadow_only else self._journal_market_event(event)
                 self._market_batch_journal[batch_key] = journaled
             elif batch_key not in self._market_batch_journal:
                 return
             else:
                 journaled = self._market_batch_journal[batch_key]
         else:
-            journaled = self._journal_market_event(event)
+            journaled = True if self.settings.quality_shadow_only else self._journal_market_event(event)
         if market_id is None or market_id in self._inactive:
             if batch_key is not None and event.batch_index + 1 == event.batch_size:
                 self._market_batch_journal.pop(batch_key, None)
@@ -480,6 +573,8 @@ class PaperEngine:
             return
         if batch_key is not None:
             self._market_batch_journal.pop(batch_key, None)
+        if self.settings.quality_shadow_only:
+            return
         now_s = self._now_s()
         if not self._strategy_writable(journaled):
             return
@@ -499,11 +594,13 @@ class PaperEngine:
     async def process_resolver_event(self, event: Any) -> None:
         if not isinstance(event, ResolverObservation):
             return
-        journaled = self._journal_resolver_event(event)
+        journaled = True if self.settings.quality_shadow_only else self._journal_resolver_event(event)
         accepted = self.resolver.accept(
             event.symbol, event.value, event.observation_ts_ms, event.receive_ts_ms
         )
         if not accepted or not self._strategy_writable(journaled):
+            return
+        if self.settings.quality_shadow_only:
             return
         now_s = self._now_s()
         events_by_market: list[tuple[MarketDefinition, tuple[Any, ...]]] = []
@@ -534,15 +631,22 @@ class PaperEngine:
             if market.market_id in self._settled or market.end_ts > now_s:
                 continue
             now_ms = self._now_ms()
-            expiration_events = self.monte_carlo_strategies[market.market_id].on_event(
-                market, self._book_mapping(market), self.resolver, now_ms, now_s, now_ms,
+            expiration_events = () if self.settings.quality_shadow_only else (
+                self.monte_carlo_strategies[market.market_id].on_event(
+                    market, self._book_mapping(market), self.resolver, now_ms, now_s, now_ms,
+                )
             )
             if expiration_events:
                 if not await self._persist_events(expiration_events):
                     return
                 self._adopt_events(market, expiration_events)
-            observed = self.monte_carlo_strategies[market.market_id].has_observations
-            if not (positions or observed):
+            observed = (
+                False if self.settings.quality_shadow_only
+                else self.monte_carlo_strategies[market.market_id].has_observations
+            )
+            quality = self.quality_states.get(market.market_id)
+            quality_observed = quality is not None and quality.observed
+            if not (positions or observed or quality_observed):
                 continue
             payload = await self.settlement_fetcher(market)
             if isinstance(payload, OfficialSettlement):
@@ -553,12 +657,25 @@ class PaperEngine:
                 settlement = None
             if settlement is None:
                 continue
+            if quality_observed and quality is not None and quality.stage != "SETTLED":
+                next_quality = copy.deepcopy(quality)
+                quality_event = next_quality.settle(settlement.winner, settlement.resolved_at)
+                try:
+                    self.journal.append(RawEvent(
+                        source="quality_shadow", receive_ts_ms=now_ms,
+                        source_ts_ms=now_ms, symbol=market.symbol, token_id=None,
+                        payload=quality_event,
+                    ))
+                except (JournalError, OSError, TypeError, ValueError):
+                    return
+                self.quality_states[market.market_id] = next_quality
             results = tuple(settle_lane(position, settlement) for position in positions.values())
-            try:
-                self.storage.record_settlement(market.market_id, settlement, results)
-            except Exception as exc:
-                self.storage_critical_reason = type(exc).__name__
-                return
+            if positions or observed:
+                try:
+                    self.storage.record_settlement(market.market_id, settlement, results)
+                except Exception as exc:
+                    self.storage_critical_reason = type(exc).__name__
+                    return
             self._settled.add(market.market_id)
             self._inactive.add(market.market_id)
             self.positions[market.market_id] = {}
@@ -614,6 +731,8 @@ class PaperEngine:
                 self.journal.writable()
             except JournalError:
                 pass
+            if self.settings.quality_shadow_only:
+                self._sample_quality_shadow(self._now_s(), self._now_ms())
             await self._retry_pending_storage()
             self._retire_expired_empty_markets(self._now_s())
             self._write_dashboard_snapshot()

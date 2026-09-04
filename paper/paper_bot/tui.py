@@ -259,6 +259,33 @@ class PaperDashboard:
             ))
         return rows
 
+    def _quality_rows(self, snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
+        states = {
+            str(row.get("market_id")): row for row in snapshot.get("quality_shadow", ())
+            if isinstance(row, Mapping)
+        }
+        rows = []
+        labels = {
+            "WATCHING": "WAIT", "CANDIDATE": "EVENT", "ENTERED": "ACTIVE POSITION",
+            "SWITCHED": "ACTIVE POSITION", "REJECTED": "WARN", "NO_SIGNAL": "WAIT",
+            "MISSED": "BLOCKED", "SETTLED": "OK",
+        }
+        for market in self._current_markets(snapshot):
+            state = states.get(str(market.get("market_id")), {})
+            stage = str(state.get("stage", "WATCHING"))
+            filters = f"A:{'Y' if state.get('filter_a') else 'n'} B:{'Y' if state.get('filter_b') else 'n'}"
+            repair = (
+                f"switched @{state.get('switch_age')}" if state.get("switch_age") is not None
+                else f"run {state.get('repair_run', 0)}/3"
+            )
+            rows.append((
+                str(market.get("symbol", "?")).upper(), state.get("last_age", "—"),
+                self._status(stage, labels.get(stage, "WAIT")), state.get("selected_side") or "—",
+                _fmt(state.get("p30"), 3), _fmt(state.get("entry_ask"), 3),
+                filters, repair, state.get("reason") or "—",
+            ))
+        return rows
+
     def _visible(self, row: Mapping[str, Any], symbols: Mapping[str, str]) -> bool:
         return not any((self.asset is not None and symbols.get(str(row["market_id"])) != self.asset,
                         self.threshold is not None and row["threshold"] != self.threshold,
@@ -457,10 +484,16 @@ class PaperDashboard:
                 "Market pulse", ("asset", "closes", "UP bid / ask", "DOWN bid / ask", "CL leader", "move bps", "age", "feed"),
                 self._pulse_rows(snapshot), subtitle="nearest open round",
             ))
-            content["signals"].update(self._panel(
-                "Our signals", ("asset", "signal", "base support", "MC support", "P(win)", "edge", "CL", "why"),
-                self._signal_rows(data, snapshot), subtitle="observational · never sends orders",
-            ))
+            if snapshot.get("mode") == "QUALITY_SHADOW_ONLY" or snapshot.get("quality_shadow"):
+                content["signals"].update(self._panel(
+                    "Quality shadow", ("asset", "age", "state", "side", "p30", "entry", "filters", "repair", "why"),
+                    self._quality_rows(snapshot), subtitle="0.60@30 · filters@120 · entry≥0.88 · no orders",
+                ))
+            else:
+                content["signals"].update(self._panel(
+                    "Our signals", ("asset", "signal", "base support", "MC support", "P(win)", "edge", "CL", "why"),
+                    self._signal_rows(data, snapshot), subtitle="observational · never sends orders",
+                ))
             content["positions"].update(self._panel(
                 "Open paper inventory", ("asset", "round UTC", "market", "timing", "state", "lanes", "UP", "DOWN"),
                 self._position_summary_rows(data, symbols), subtitle="virtual fills only",

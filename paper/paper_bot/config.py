@@ -14,6 +14,7 @@ class Settings:
     thresholds: tuple[Decimal, ...]
     paper_notional_usd: Decimal
     rtds_stale_seconds: Decimal
+    quality_shadow_only: bool
     data_dir: Path
     gamma_url: str
     market_ws_url: str
@@ -25,11 +26,16 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     if forbidden:
         raise ValueError("forbidden credential environment keys: " + ",".join(forbidden))
 
+    raw_shadow = env.get("QUALITY_SHADOW_ONLY", "true").strip().lower()
+    if raw_shadow not in {"true", "false"}:
+        raise ValueError("QUALITY_SHADOW_ONLY must be true or false")
+
     return Settings(
         symbols=tuple(x.strip().lower() for x in env.get("SYMBOLS", "btc,eth,sol").split(",")),
         thresholds=tuple(Decimal(x) for x in env.get("ENTRY_THRESHOLDS", "0.80,0.85,0.89,0.90").split(",")),
         paper_notional_usd=Decimal(env.get("PAPER_NOTIONAL_USD", "5.00")),
         rtds_stale_seconds=Decimal(env.get("RTDS_STALE_SEC", "10")),
+        quality_shadow_only=raw_shadow == "true",
         data_dir=Path(env.get("DATA_DIR", "/data")),
         gamma_url="https://gamma-api.polymarket.com",
         market_ws_url="wss://ws-subscriptions-clob.polymarket.com/ws/market",
