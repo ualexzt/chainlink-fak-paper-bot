@@ -137,6 +137,20 @@ class SecurityScanTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=f"stdout={result.stdout!r} stderr={result.stderr!r}")
 
+    def test_security_scan_config_allowlist_is_independent_of_checkout_prefix(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        scanner = repo_root / "paper/scripts/security_scan.py"
+        source = repo_root / "paper/paper_bot/config.py"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            package = Path(tmpdir) / "paper_bot"
+            package.mkdir()
+            (package / "config.py").write_bytes(source.read_bytes())
+            result = subprocess.run(
+                [sys.executable, str(scanner), str(package)],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
     def test_security_scan_rejects_filename_credential_substrings_without_echoing_content(self):
         repo_root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as tmpdir:

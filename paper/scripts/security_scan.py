@@ -64,7 +64,7 @@ def scan_text(path: Path, text: str) -> list[Finding]:
     }
     for line_number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
-        if path.as_posix().endswith("paper/paper_bot/config.py") and stripped in allowed_config_lines:
+        if path.name == "config.py" and path.parent.name == "paper_bot" and stripped in allowed_config_lines:
             continue
         for rule, pattern in FORBIDDEN_LINE_PATTERNS:
             if pattern.search(line):
