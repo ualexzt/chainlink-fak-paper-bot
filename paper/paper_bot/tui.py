@@ -833,16 +833,12 @@ class PaperDashboard:
         quality_mode = snapshot.get("mode") == "QUALITY_SHADOW_ONLY"
         if quality_mode and self.view == "overview":
             content.split_column(
-                Layout(name="cards", size=12), Layout(name="flow", size=8),
-                Layout(name="health", size=7),
+                Layout(name="cards", size=12), Layout(name="overall", size=9),
+                Layout(name="assets", size=12), Layout(name="health", size=6),
             )
             content["cards"].update(self._quality_cards(snapshot))
-            content["flow"].update(self._panel(
-                "Live decision rail",
-                ("asset", "age", "phase", "state", "30s signal", "120s entry", "repair", "decision"),
-                self._quality_flow_rows(snapshot),
-                subtitle="causal · exact-second · forward sample",
-            ))
+            content["overall"].update(self._quality_overall(snapshot))
+            content["assets"].update(self._quality_asset_cards(snapshot))
             content["health"].update(self._panel(
                 "Telemetry deck", ("component", "state", "current detail"),
                 self._health_rows(data, snapshot),

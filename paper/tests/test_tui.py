@@ -169,8 +169,9 @@ class DashboardTests(unittest.TestCase):
         storage.close()
 
         overview = self.rendered()
-        for expected in ("QUALITY SHADOW · NO ORDERS", "ASK TREND", "Live decision rail",
-                         "30s SIGNAL", "REPAIR WINDOW", "watch 2/3"):
+        for expected in ("QUALITY SHADOW · NO ORDERS", "ASK TREND", "ALL COINS · overall statistics",
+                         "BTC statistics", "ETH statistics", "SOL statistics", "30s SIGNAL",
+                         "120s ENTRY", "REPAIR", "REPAIR WINDOW", "repair 2/3"):
             self.assertIn(expected, overview)
         performance = self.rendered(view="performance")
         for expected in ("ALL COINS · overall statistics", "30s SIGNAL", "120s ENTRY", "REPAIR",

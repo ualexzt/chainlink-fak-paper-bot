@@ -18,10 +18,11 @@ warning filters through ages 90/120, entry eligibility at age 120 with
 `ask >= 0.88`, and at most one full-switch repair after a three-second `0.20` bid
 drawdown (trigger no later than age 240, execution on the next observed second).
 These are observational paper actions only; no venue order is constructed or sent.
-In this mode the overview uses live asset cards with a 300-second progress rail,
-recent ask sparkline, exact 30/120-second milestones, warning-filter lights, and
-repair state. `--view performance` shows only forward, officially settled shadow
-results, with an all-coins summary and separate BTC/ETH/SOL cards. Each uses the
+In this mode the default overview is a single-screen command center. Live asset
+cards with a 300-second progress rail, recent ask sparkline, exact 30/120-second
+milestones, warning-filter lights, and repair state appear together with the
+all-coins summary and separate BTC/ETH/SOL statistics. `--view performance` keeps
+those forward statistics and adds the detailed settled-decision table. Each card uses the
 same `total / win-or-improved / loss-or-not-improved / rate` table for the age-30
 signal, age-120 paper entry, and repair stages, followed by skipped signals,
 average entry, no-fee PnL, and recent outcome marks. Repair success means the
