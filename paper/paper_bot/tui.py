@@ -488,7 +488,10 @@ class PaperDashboard:
             selected, winner = result.get("selected_side"), result.get("winner")
             if result.get("entry_ask") is None:
                 action = "NO TRADE"
-                outcome = "NO SIGNAL" if selected is None else "FILTERED"
+                outcome = (
+                    "NO SIGNAL" if selected is None else
+                    "SKIP · HIT" if selected == winner else "SKIP · MISS"
+                )
                 pnl = "—"
             else:
                 action = "HOLD" if result.get("switch_age") is None else f"SWITCH @{result.get('switch_age')}s"
@@ -499,28 +502,91 @@ class PaperDashboard:
             rows.append((
                 str(result.get("symbol", "?")).upper(), round_utc,
                 f"{selected or '—'} @ {_fmt(result.get('p30'), 2)}", _fmt(result.get("entry_ask"), 2),
-                action, winner or "—", self._status(outcome, "OK" if outcome == "POSITIVE" else "WARN"), pnl,
+                action, winner or "—", self._status(
+                    outcome, "OK" if outcome in {"POSITIVE", "SKIP · HIT"} else "WARN"
+                ), pnl,
             ))
         return rows
 
-    def _quality_asset_rows(self, snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
+    def _quality_asset_card(
+        self, symbol: str, results: list[Mapping[str, Any]],
+    ) -> Panel:
+        signaled = [row for row in results if row.get("selected_side") in {"UP", "DOWN"}]
+        entered = [row for row in results if row.get("entry_ask") is not None]
+        signal_wins = sum(row.get("selected_side") == row.get("winner") for row in signaled)
+        entry_prices = [_decimal(row["entry_ask"]) for row in entered]
+        pnls = [_decimal(row["pnl"]) for row in entered if row.get("pnl") is not None]
+        skipped = [row for row in signaled if row.get("entry_ask") is None]
+        skipped_wins = sum(row.get("selected_side") == row.get("winner") for row in skipped)
+        repairs = sum(row.get("switch_age") is not None for row in entered)
+        positive = sum(pnl > ZERO for pnl in pnls)
+        net = sum(pnls, ZERO)
+
+        cumulative: list[Decimal] = []
+        running = ZERO
+        for pnl in pnls:
+            running += pnl
+            cumulative.append(running)
+
+        signal_record = Text()
+        for row in results[-14:]:
+            selected = row.get("selected_side")
+            if selected not in {"UP", "DOWN"}:
+                signal_record.append("·", style="dim")
+            elif selected == row.get("winner"):
+                signal_record.append("✓", style="bold green")
+            else:
+                signal_record.append("×", style="bold red")
+        if not signal_record.plain:
+            signal_record.append("—", style="dim")
+
+        recent = Text()
+        for row in results[-14:]:
+            if row.get("entry_ask") is None or row.get("pnl") is None:
+                recent.append("·", style="dim")
+                continue
+            pnl = _decimal(row["pnl"])
+            recent.append("▲" if pnl > ZERO else "▼" if pnl < ZERO else "◆",
+                          style="green" if pnl > ZERO else "red" if pnl < ZERO else "yellow")
+        if not recent.plain:
+            recent.append("—", style="dim")
+
+        def ratio(numerator: int, denominator: int) -> str:
+            return "—" if not denominator else f"{numerator / denominator:.1%}"
+
+        grid = Table.grid(expand=True, padding=(0, 1))
+        grid.add_column(style="dim")
+        grid.add_column(justify="right", style="bold white")
+        grid.add_row("SETTLED / SIGNALS", f"{len(results)} / {len(signaled)}")
+        grid.add_row("SIGNAL HIT", f"{ratio(signal_wins, len(signaled))}  {signal_wins}/{len(signaled)}")
+        grid.add_row("SKIPPED HIT", f"{ratio(skipped_wins, len(skipped))}  {skipped_wins}/{len(skipped)}")
+        grid.add_row("30s OUTCOMES", signal_record)
+        grid.add_row("ENTRIES", f"{len(entered)}  ({ratio(len(entered), len(signaled))})")
+        grid.add_row("AVG ENTRY", "—" if not entry_prices else f"${sum(entry_prices, ZERO) / len(entry_prices):.3f}")
+        grid.add_row("TRADE WIN", f"{ratio(positive, len(pnls))}  {positive}/{len(pnls)}")
+        grid.add_row("REPAIRS", f"{repairs}  ({ratio(repairs, len(entered))})")
+        grid.add_row("NET / AVG", "—" if not pnls else f"${net:+.3f} / ${net / len(pnls):+.3f}")
+        grid.add_row("P&L CURVE", Text(_sparkline(cumulative, width=16), style="bright_cyan"))
+        grid.add_row("TRADE LAST 14", recent)
+        return Panel(
+            grid, title=f"[bold]{symbol} statistics[/bold]", title_align="left",
+            subtitle="USD 1 · no fees", subtitle_align="right", box=box.ROUNDED,
+            border_style={"BTC": "bright_yellow", "ETH": "bright_cyan", "SOL": "bright_magenta"}.get(
+                symbol, "bright_black"
+            ),
+        )
+
+    def _quality_asset_cards(self, snapshot: Mapping[str, Any]) -> Table:
         grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
         for row in self._quality_results(snapshot):
             grouped[str(row.get("symbol", "?")).upper()].append(row)
-        rows = []
-        for symbol, results in sorted(grouped.items()):
-            signaled = [r for r in results if r.get("selected_side") in {"UP", "DOWN"}]
-            entered = [r for r in results if r.get("entry_ask") is not None]
-            wins = sum(r.get("selected_side") == r.get("winner") for r in signaled)
-            pnls = [_decimal(r["pnl"]) for r in entered if r.get("pnl") is not None]
-            rows.append((
-                symbol, len(results), len(signaled),
-                "—" if not signaled else f"{wins / len(signaled):.1%}", len(entered),
-                sum(r.get("switch_age") is not None for r in entered),
-                "—" if not pnls else f"{sum(p > ZERO for p in pnls) / len(pnls):.1%}",
-                "—" if not pnls else f"{sum(pnls, ZERO):+.4f}",
-            ))
-        return rows
+        symbols = [self.asset.upper()] if self.asset else ["BTC", "ETH", "SOL"]
+        cards = [self._quality_asset_card(symbol, grouped.get(symbol, [])) for symbol in symbols]
+        grid = Table.grid(expand=True, padding=(0, 1))
+        for _ in cards:
+            grid.add_column(ratio=1)
+        grid.add_row(*cards)
+        return grid
 
     def _visible(self, row: Mapping[str, Any], symbols: Mapping[str, str]) -> bool:
         return not any((self.asset is not None and symbols.get(str(row["market_id"])) != self.asset,
@@ -748,15 +814,11 @@ class PaperDashboard:
             ))
         elif quality_mode and self.view == "performance":
             content.split_column(
-                Layout(name="kpis", size=6), Layout(name="assets", size=8),
+                Layout(name="kpis", size=6), Layout(name="assets", size=14),
                 Layout(name="results", ratio=1),
             )
             content["kpis"].update(self._quality_kpis(snapshot))
-            content["assets"].update(self._panel(
-                "Forward score by asset",
-                ("asset", "settled", "signals", "signal hit", "entries", "repairs", "positive", "paper net"),
-                self._quality_asset_rows(snapshot), subtitle="officially settled only · no fees",
-            ))
+            content["assets"].update(self._quality_asset_cards(snapshot))
             content["results"].update(self._panel(
                 "Recent settled decisions",
                 ("asset", "round UTC", "signal", "entry", "action", "winner", "result", "PnL"),

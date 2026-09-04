@@ -21,9 +21,13 @@ These are observational paper actions only; no venue order is constructed or sen
 In this mode the overview uses live asset cards with a 300-second progress rail,
 recent ask sparkline, exact 30/120-second milestones, warning-filter lights, and
 repair state. `--view performance` shows only forward, officially settled shadow
-results; `--view activity` separates the live decision timeline from the settled
-decision tape. Paper PnL remains explicitly fee-free and is never presented as a
-live fill or account balance.
+results, with separate BTC/ETH/SOL cards for signal accuracy, entry rate, average
+entry, profitable-trade rate, repairs, net/average PnL, and recent PnL direction;
+the cards and recent-decision table retain the official outcome of every age-30
+signal even when the candidate was rejected at age 120 and no trade was modeled;
+`--view activity` separates the live decision timeline from the settled decision
+tape. Paper PnL remains explicitly fee-free and is never presented as a live fill
+or account balance.
 
 ## Local operation
 

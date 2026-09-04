@@ -159,6 +159,11 @@ class DashboardTests(unittest.TestCase):
             "symbol": "eth", "selected_side": "DOWN", "p30": "0.70",
             "entry_ask": "0.93", "switch_age": 168, "winner": "UP",
             "pnl": "-0.032258", "trail": [],
+        }, {
+            "stage": "SETTLED", "market_id": "btc-filtered", "mkt_ts": 400,
+            "symbol": "btc", "selected_side": "UP", "p30": "0.65",
+            "entry_ask": None, "switch_age": None, "winner": "UP",
+            "pnl": None, "reason": "entry_ask_below_0.88", "trail": [],
         }]
         storage.write_dashboard_snapshot(snapshot, 1_200_000)
         storage.close()
@@ -169,7 +174,9 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(expected, overview)
         performance = self.rendered(view="performance")
         for expected in ("SIGNAL HIT", "ENTRIES", "REPAIRS", "PAPER NET",
-                         "Forward score by asset", "Recent settled decisions", "SWITCH @168s"):
+                         "BTC statistics", "ETH statistics", "SOL statistics", "AVG ENTRY",
+                         "TRADE WIN", "SKIPPED HIT", "30s OUTCOMES", "P&L CURVE",
+                         "Recent settled decisions", "SWITCH @168s", "SKIP · HIT"):
             self.assertIn(expected, performance)
         activity = self.rendered(view="activity")
         self.assertIn("Live strategy timeline", activity)
