@@ -47,6 +47,11 @@ and official settlement events.
   and BTC recorded `NO_SIGNAL` at asks `0.44/0.57`.
 - At age 120, ETH was rejected at `0.78` by the `0.88` entry floor; SOL recorded
   a paper-only entry at `0.93` for `1.075268817204301075268817204` shares per USD 1.
+- SOL armed repair at age 167 (`bid 0.45`) and switched at age 168 by selling
+  `DOWN @ 0.45` and observing the equal-share `UP @ 0.55` purchase. Official
+  settlement later reported `UP`; the recorded no-fee paper PnL was
+  `-0.032258064516129032258064516`, substantially better than the unswitched
+  USD 1 loss but correctly classified as still negative.
 - Legacy database counters remained unchanged across the live observation:
   signals `1763`, paper orders `1801`, Monte Carlo forecasts `3625`, settlements
   `1301`, and lane results `1725`.
