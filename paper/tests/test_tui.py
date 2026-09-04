@@ -173,9 +173,9 @@ class DashboardTests(unittest.TestCase):
                          "30s SIGNAL", "REPAIR WINDOW", "watch 2/3"):
             self.assertIn(expected, overview)
         performance = self.rendered(view="performance")
-        for expected in ("SIGNAL HIT", "ENTRIES", "REPAIRS", "PAPER NET",
-                         "BTC statistics", "ETH statistics", "SOL statistics", "AVG ENTRY",
-                         "TRADE WIN", "SKIPPED HIT", "30s OUTCOMES", "P&L CURVE",
+        for expected in ("ALL COINS · overall statistics", "30s SIGNAL", "120s ENTRY", "REPAIR",
+                         "W/+", "L/−", "BTC statistics", "ETH statistics", "SOL statistics",
+                         "avg entry", "skip-hit", "30s history", "trade history",
                          "Recent settled decisions", "SWITCH @168s", "SKIP · HIT"):
             self.assertIn(expected, performance)
         activity = self.rendered(view="activity")

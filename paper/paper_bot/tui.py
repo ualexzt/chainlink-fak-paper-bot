@@ -453,34 +453,84 @@ class PaperDashboard:
             if isinstance(row, Mapping) and row.get("stage") == "SETTLED"
         ]
 
-    def _quality_kpis(self, snapshot: Mapping[str, Any]) -> Table:
-        results = self._quality_results(snapshot)
+    @staticmethod
+    def _quality_metrics(results: list[Mapping[str, Any]]) -> dict[str, Any]:
         signaled = [row for row in results if row.get("selected_side") in {"UP", "DOWN"}]
         entered = [row for row in results if row.get("entry_ask") is not None]
         switched = [row for row in entered if row.get("switch_age") is not None]
         signal_wins = sum(row.get("selected_side") == row.get("winner") for row in signaled)
+        entry_prices = [_decimal(row["entry_ask"]) for row in entered]
         pnls = [_decimal(row["pnl"]) for row in entered if row.get("pnl") is not None]
         positive = sum(pnl > ZERO for pnl in pnls)
+        repair_better = 0
+        for row in switched:
+            if row.get("pnl") is None:
+                continue
+            entry_ask = _decimal(row["entry_ask"])
+            hold_pnl = -Decimal("1")
+            if row.get("selected_side") == row.get("winner"):
+                hold_pnl += Decimal("1") / entry_ask
+            if _decimal(row["pnl"]) > hold_pnl:
+                repair_better += 1
+        skipped = [row for row in signaled if row.get("entry_ask") is None]
+        skipped_wins = sum(row.get("selected_side") == row.get("winner") for row in skipped)
         net = sum(pnls, ZERO)
-        values = (
-            ("SETTLED", str(len(results)), "official only"),
-            ("SIGNAL HIT", "—" if not signaled else f"{signal_wins / len(signaled):.1%}", f"{signal_wins}/{len(signaled)}"),
-            ("ENTRIES", str(len(entered)), "ask ≥ 0.88"),
-            ("REPAIRS", str(len(switched)), "full switches"),
-            ("POSITIVE", "—" if not pnls else f"{positive / len(pnls):.1%}", f"{positive}/{len(pnls)}"),
-            ("PAPER NET", f"{net:+.3f}" if pnls else "—", "USD · no fees"),
+        return {
+            "settled": len(results), "signals": len(signaled),
+            "signal_wins": signal_wins, "signal_losses": len(signaled) - signal_wins,
+            "entries": len(entered), "trade_wins": positive,
+            "trade_losses": len(pnls) - positive, "repairs": len(switched),
+            "repair_better": repair_better, "repair_not_better": len(switched) - repair_better,
+            "skipped": len(skipped), "skipped_wins": skipped_wins,
+            "no_signal": len(results) - len(signaled),
+            "avg_entry": None if not entry_prices else sum(entry_prices, ZERO) / len(entry_prices),
+            "net": net, "avg_pnl": None if not pnls else net / len(pnls),
+        }
+
+    @staticmethod
+    def _quality_stage_table(metrics: Mapping[str, Any]) -> Table:
+        def rate(wins: int, total: int) -> str:
+            return "—" if not total else f"{wins / total:.0%}"
+
+        rows = (
+            ("30s SIGNAL", metrics["signals"], metrics["signal_wins"], metrics["signal_losses"],
+             rate(metrics["signal_wins"], metrics["signals"])),
+            ("120s ENTRY", metrics["entries"], metrics["trade_wins"], metrics["trade_losses"],
+             rate(metrics["trade_wins"], metrics["entries"])),
+            ("REPAIR", metrics["repairs"], metrics["repair_better"], metrics["repair_not_better"],
+             rate(metrics["repair_better"], metrics["repairs"])),
         )
-        cards = []
-        for title, value, subtitle in values:
-            body = Text(justify="center")
-            body.append(value + "\n", style="bold bright_cyan")
-            body.append(subtitle, style="dim")
-            cards.append(Panel(body, title=title, box=box.ROUNDED, border_style="bright_black"))
-        grid = Table.grid(expand=True, padding=(0, 1))
-        for _ in cards:
-            grid.add_column(ratio=1)
-        grid.add_row(*cards)
-        return grid
+        table = Table(expand=True, box=None, padding=(0, 1), header_style="bold bright_cyan")
+        table.add_column("stage", no_wrap=True)
+        table.add_column("N", justify="right")
+        table.add_column("W/+", justify="right", style="green")
+        table.add_column("L/−", justify="right", style="red")
+        table.add_column("WR", justify="right")
+        for row in rows:
+            table.add_row(*(str(value) for value in row))
+        return table
+
+    def _quality_overall(self, snapshot: Mapping[str, Any]) -> Panel:
+        metrics = self._quality_metrics(self._quality_results(snapshot))
+        body = Table.grid(expand=True)
+        body.add_column()
+        body.add_row(self._quality_stage_table(metrics))
+        body.add_row(Text(
+            f"settled {metrics['settled']}  ·  no signal {metrics['no_signal']}  ·  "
+            f"skipped {metrics['skipped']} (hit {metrics['skipped_wins']}/{metrics['skipped']})",
+            style="dim",
+        ))
+        body.add_row(Text(
+            f"avg entry {_fmt(metrics['avg_entry'], 3)}  ·  paper net {_fmt(metrics['net'], 3)}  ·  "
+            f"avg/trade {_fmt(metrics['avg_pnl'], 3)}",
+            style="bold white",
+        ))
+        body.add_row(Text("repair +/− = better / not better than holding the original side", style="dim cyan"))
+        return Panel(
+            body, title="[bold]ALL COINS · overall statistics[/bold]", title_align="left",
+            subtitle="official settlement · USD 1 · no fees", subtitle_align="right",
+            border_style="bright_cyan", box=box.ROUNDED, padding=(0, 1),
+        )
 
     def _quality_result_rows(self, snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
         rows = []
@@ -511,22 +561,7 @@ class PaperDashboard:
     def _quality_asset_card(
         self, symbol: str, results: list[Mapping[str, Any]],
     ) -> Panel:
-        signaled = [row for row in results if row.get("selected_side") in {"UP", "DOWN"}]
-        entered = [row for row in results if row.get("entry_ask") is not None]
-        signal_wins = sum(row.get("selected_side") == row.get("winner") for row in signaled)
-        entry_prices = [_decimal(row["entry_ask"]) for row in entered]
-        pnls = [_decimal(row["pnl"]) for row in entered if row.get("pnl") is not None]
-        skipped = [row for row in signaled if row.get("entry_ask") is None]
-        skipped_wins = sum(row.get("selected_side") == row.get("winner") for row in skipped)
-        repairs = sum(row.get("switch_age") is not None for row in entered)
-        positive = sum(pnl > ZERO for pnl in pnls)
-        net = sum(pnls, ZERO)
-
-        cumulative: list[Decimal] = []
-        running = ZERO
-        for pnl in pnls:
-            running += pnl
-            cumulative.append(running)
+        metrics = self._quality_metrics(results)
 
         signal_record = Text()
         for row in results[-14:]:
@@ -551,26 +586,27 @@ class PaperDashboard:
         if not recent.plain:
             recent.append("—", style="dim")
 
-        def ratio(numerator: int, denominator: int) -> str:
-            return "—" if not denominator else f"{numerator / denominator:.1%}"
-
-        grid = Table.grid(expand=True, padding=(0, 1))
-        grid.add_column(style="dim")
-        grid.add_column(justify="right", style="bold white")
-        grid.add_row("SETTLED / SIGNALS", f"{len(results)} / {len(signaled)}")
-        grid.add_row("SIGNAL HIT", f"{ratio(signal_wins, len(signaled))}  {signal_wins}/{len(signaled)}")
-        grid.add_row("SKIPPED HIT", f"{ratio(skipped_wins, len(skipped))}  {skipped_wins}/{len(skipped)}")
-        grid.add_row("30s OUTCOMES", signal_record)
-        grid.add_row("ENTRIES", f"{len(entered)}  ({ratio(len(entered), len(signaled))})")
-        grid.add_row("AVG ENTRY", "—" if not entry_prices else f"${sum(entry_prices, ZERO) / len(entry_prices):.3f}")
-        grid.add_row("TRADE WIN", f"{ratio(positive, len(pnls))}  {positive}/{len(pnls)}")
-        grid.add_row("REPAIRS", f"{repairs}  ({ratio(repairs, len(entered))})")
-        grid.add_row("NET / AVG", "—" if not pnls else f"${net:+.3f} / ${net / len(pnls):+.3f}")
-        grid.add_row("P&L CURVE", Text(_sparkline(cumulative, width=16), style="bright_cyan"))
-        grid.add_row("TRADE LAST 14", recent)
+        grid = Table.grid(expand=True)
+        grid.add_column()
+        grid.add_row(self._quality_stage_table(metrics))
+        grid.add_row(Text(
+            f"rounds {metrics['settled']} · no-sig {metrics['no_signal']} · "
+            f"skip-hit {metrics['skipped_wins']}/{metrics['skipped']}", style="dim",
+        ))
+        summary = Text()
+        summary.append(f"entry {_fmt(metrics['avg_entry'], 3)}", style="white")
+        summary.append(f" · net {_fmt(metrics['net'], 3)} · fee-free",
+                       style="bold green" if metrics["net"] > ZERO else "bold red")
+        grid.add_row(summary)
+        records = Table.grid(expand=True)
+        records.add_column(style="dim")
+        records.add_column(justify="right")
+        records.add_row("30s history", signal_record)
+        records.add_row("trade history", recent)
+        grid.add_row(records)
         return Panel(
             grid, title=f"[bold]{symbol} statistics[/bold]", title_align="left",
-            subtitle="USD 1 · no fees", subtitle_align="right", box=box.ROUNDED,
+            subtitle="✓/▲ good · ×/▼ bad · · none", subtitle_align="right", box=box.ROUNDED,
             border_style={"BTC": "bright_yellow", "ETH": "bright_cyan", "SOL": "bright_magenta"}.get(
                 symbol, "bright_black"
             ),
@@ -814,10 +850,10 @@ class PaperDashboard:
             ))
         elif quality_mode and self.view == "performance":
             content.split_column(
-                Layout(name="kpis", size=6), Layout(name="assets", size=14),
+                Layout(name="overall", size=9), Layout(name="assets", size=12),
                 Layout(name="results", ratio=1),
             )
-            content["kpis"].update(self._quality_kpis(snapshot))
+            content["overall"].update(self._quality_overall(snapshot))
             content["assets"].update(self._quality_asset_cards(snapshot))
             content["results"].update(self._panel(
                 "Recent settled decisions",
