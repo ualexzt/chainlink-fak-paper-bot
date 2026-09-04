@@ -88,3 +88,23 @@ This verifies immediate operation and causal capture, not long-run profitability
 - Forward performance cards begin accumulating settled outcomes from this
   deployment. Earlier observations remain preserved in the raw journal rather
   than being reconstructed into dashboard statistics after seeing their result.
+
+### Per-asset statistics extension
+
+- Commit `f2ed025` replaced the compact asset table with separate BTC, ETH, and
+  SOL statistic cards. Each card reports settled rounds, age-30 signal accuracy,
+  skipped-signal accuracy, entry rate, average entry, profitable-trade rate,
+  repair rate, net/average no-fee PnL, cumulative PnL sparkline, and recent trade
+  direction.
+- `30s OUTCOMES` includes every officially settled signal (`✓` hit, `×` miss,
+  `·` no signal), including candidates rejected at age 120. Rejected candidates
+  remain no-trades and are shown as `SKIP · HIT` or `SKIP · MISS` in the decision
+  table; they never enter paper PnL.
+- Pre-recreate backup:
+  `paper/runtime/backups/paper-pre-asset-stats-20260904T063942Z.db`
+- Backup SHA-256:
+  `dd2751bfb9ee5a189ebd790839f93fee0781334fb611ffe49b61313bb5df8bd4`
+- Verification: 236 local tests passed; 18 TUI/quality tests and the security
+  scan passed in the server image. Live `performance` rendered without clipping
+  at both 120 and 180 columns; the recreated service returned healthy with zero
+  restarts and no OOM kill.
