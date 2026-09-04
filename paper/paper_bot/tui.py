@@ -394,10 +394,16 @@ class PaperDashboard:
         grid.add_row(Text(_sparkline(chainlink_values), style="bright_yellow"),
                      Text(f"CL {cl_leader} · {cl_move} bp", style="yellow"))
         signal = f"{side or '—'} @ {_fmt(state.get('p30'), 2)}"
-        if side == "UP":
+        if side == "UP" and stage in {"CANDIDATE", "ENTERED"}:
             signal_badge = Text(f"▲ ACTIVE SIGNAL  UP  @ {_fmt(state.get('p30'), 2)}", style="bold bright_cyan")
-        elif side == "DOWN":
+        elif side == "DOWN" and stage in {"CANDIDATE", "ENTERED"}:
             signal_badge = Text(f"▼ ACTIVE SIGNAL  DOWN  @ {_fmt(state.get('p30'), 2)}", style="bold bright_magenta")
+        elif side in {"UP", "DOWN"}:
+            arrow = "▲" if side == "UP" else "▼"
+            signal_badge = Text(
+                f"{arrow} 30s SIGNAL  {side}  @ {_fmt(state.get('p30'), 2)}",
+                style="yellow" if stage in {"REJECTED", "MISSED"} else "dim",
+            )
         else:
             signal_badge = Text("◇ SIGNAL  awaiting 30s", style="dim")
         if stage == "SWITCHED" and side in {"UP", "DOWN"}:
