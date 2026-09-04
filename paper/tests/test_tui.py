@@ -176,7 +176,7 @@ class DashboardTests(unittest.TestCase):
         for expected in ("QUALITY SHADOW · NO ORDERS", "ASK TREND", "ALL COINS · overall statistics",
                          "BTC statistics", "ETH statistics", "SOL statistics", "30s SIGNAL",
                          "120s ENTRY", "REPAIR", "REPAIR WINDOW", "repair 2/3",
-                         "ACTIVE SIGNAL  UP", "CL UP · 100 bp", "STATS UPDATE"):
+                         "ACTIVE UP @ 0.64", "CL UP · 100 bp", "STATS UPDATE"):
             self.assertIn(expected, overview)
         snapshot["quality_shadow"][0]["stage"] = "REJECTED"
         storage = Storage(self.path)
@@ -184,8 +184,8 @@ class DashboardTests(unittest.TestCase):
         storage.write_dashboard_snapshot(snapshot, 1_200_000)
         storage.close()
         rejected = self.rendered()
-        self.assertIn("30s SIGNAL  UP", rejected)
-        self.assertNotIn("ACTIVE SIGNAL  UP", rejected)
+        self.assertIn("30s UP @ 0.64", rejected)
+        self.assertNotIn("ACTIVE UP", rejected)
         performance = self.rendered(view="performance")
         for expected in ("ALL COINS · overall statistics", "30s SIGNAL", "120s ENTRY", "REPAIR",
                          "W/+", "L/−", "BTC statistics", "ETH statistics", "SOL statistics",
