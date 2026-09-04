@@ -726,19 +726,27 @@ class PaperEngine:
             await self._sleep(self.settlement_interval)
 
     async def _heartbeat_loop(self) -> None:
+        last_maintenance_s: int | None = None
         while True:
-            now = datetime.fromtimestamp(self._now_s(), UTC)
-            try:
-                self.journal.rotate_if_needed(now)
-                self.journal.writable()
-            except JournalError:
-                pass
-            if self.settings.quality_shadow_only:
-                self._sample_quality_shadow(self._now_s(), self._now_ms())
-            await self._retry_pending_storage()
-            self._retire_expired_empty_markets(self._now_s())
-            self._write_dashboard_snapshot()
-            await self._sleep(self.heartbeat_interval)
+            now_s = self._now_s()
+            if now_s != last_maintenance_s:
+                now = datetime.fromtimestamp(now_s, UTC)
+                try:
+                    self.journal.rotate_if_needed(now)
+                    self.journal.writable()
+                except JournalError:
+                    pass
+                if self.settings.quality_shadow_only:
+                    self._sample_quality_shadow(now_s, self._now_ms())
+                await self._retry_pending_storage()
+                self._retire_expired_empty_markets(now_s)
+                self._write_dashboard_snapshot()
+                last_maintenance_s = now_s
+            poll_interval = (
+                min(self.heartbeat_interval, 0.2)
+                if self.settings.quality_shadow_only else self.heartbeat_interval
+            )
+            await self._sleep(poll_interval)
 
     async def _market_feed_supervisor(self) -> None:
         assert self.market_ws is not None

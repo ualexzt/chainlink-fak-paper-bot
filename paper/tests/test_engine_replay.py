@@ -754,6 +754,32 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
             row["market_id"] for row in engine._dashboard_payload()["quality_shadow"]
         })
 
+    async def test_quality_heartbeat_polls_subsecond_but_writes_once_per_second(self):
+        definition = market()
+        self.settings = replace(self.settings, quality_shadow_only=True)
+        self.now[0] = definition.mkt_ts + 29
+        self.now_ms[0] = self.now[0] * 1000
+        delays = []
+
+        async def stop_after_three(delay):
+            delays.append(delay)
+            if len(delays) == 2:
+                self.now[0] += 1
+                self.now_ms[0] += 1_000
+            if len(delays) == 3:
+                raise asyncio.CancelledError
+
+        engine = await self.make_engine((definition,), sleep=stop_after_three)
+        await self.seed_books(engine, definition)
+        with self.assertRaises(asyncio.CancelledError):
+            await engine._heartbeat_loop()
+        self.assertEqual(delays, [0.2, 0.2, 0.2])
+        rows = []
+        for path in (self.root / "raw").glob("*.jsonl"):
+            rows.extend(json.loads(line) for line in path.read_text().splitlines())
+        seconds = [row for row in rows if row["payload"]["event_type"] == "quality_second"]
+        self.assertEqual(len(seconds), 2, "ages 29 and 30 are written once despite subsecond polling")
+
     async def test_transient_dashboard_write_failure_gates_then_recovers(self):
         engine = await self.make_engine((market(),), db_name="dashboard-retry.db")
         original = engine.storage.write_dashboard_snapshot
