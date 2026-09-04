@@ -4,7 +4,8 @@
 
 - Server: `/home/ubuntu/chainlink-fak-paper-bot`
 - Service: `paper-paper-engine-1`
-- Final code commit: `6bc77174a8b3ab4b3e9a214a0b719bf92293ea55`
+- Quality strategy commit: `6bc77174a8b3ab4b3e9a214a0b719bf92293ea55`
+- Modern dashboard commit: `f7f454fb60ec8e175933ba05c932a4f85c5b6bb6`
 - Strictly public-data, paper-only operation; no venue order path or credentials.
 - `QUALITY_SHADOW_ONLY=true` disables legacy lanes, Monte Carlo decisions, simulated
   order creation, and the high-volume raw feed journal.
@@ -59,3 +60,31 @@ and official settlement events.
   contained only `quality_shadow` source rows.
 
 This verifies immediate operation and causal capture, not long-run profitability.
+
+## Modern dashboard deployment
+
+- Added responsive per-asset cards with market phase, 300-second progress rail,
+  bid/ask movement, ask sparklines, signal/entry/filter/repair state, and explicit
+  public-data context.
+- Reworked `performance` around quality-shadow outcomes: settled decisions,
+  signal hits, entries, repairs, positive outcomes, no-fee paper net, per-asset
+  score, and recent official settlements.
+- Reworked `activity` around the live strategy timeline and decision tape. The
+  header always states `QUALITY SHADOW · NO ORDERS` so paper observations cannot
+  be mistaken for live positions or venue orders.
+- The engine now retains a bounded 48-sample price trail per market and a rolling
+  250-result dashboard summary. The compact raw journal remains authoritative.
+- Pre-recreate backup:
+  `paper/runtime/backups/paper-pre-modern-tui-20260904T055203Z.db`
+- Backup SHA-256:
+  `163987280c431d4cbf850e06551ebd2819df0a9c34d4b9b6b9229dc7a104fac4`
+- Local verification: 236 tests passed; compile, diff, and security checks passed.
+- New server image: 43 strategy/engine/TUI tests passed; all 29 packaging and
+  configuration tests passed from the server checkout; the image security scan
+  passed.
+- Live verification: all three views rendered without overflow at 120 and 180
+  columns. The recreated container reached `running/healthy`, restart count zero,
+  and OOM false; legacy database counters remained unchanged.
+- Forward performance cards begin accumulating settled outcomes from this
+  deployment. Earlier observations remain preserved in the raw journal rather
+  than being reconstructed into dashboard statistics after seeing their result.
