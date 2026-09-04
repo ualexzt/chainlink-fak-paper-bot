@@ -19,6 +19,7 @@ OPPOSITE_WARNING_RUN = 10
 REPAIR_DRAWDOWN = Decimal("0.20")
 REPAIR_RUN = 3
 PAPER_NOTIONAL = Decimal("1")
+TRAIL_LIMIT = 48
 VERSION = 1
 
 
@@ -69,6 +70,7 @@ class QualityShadowState:
         self.extra_capital: Decimal | None = None
         self.winner: str | None = None
         self.pnl: Decimal | None = None
+        self.trail: list[dict[str, Any]] = []
 
     @property
     def observed(self) -> bool:
@@ -98,6 +100,12 @@ class QualityShadowState:
             return ()
         consecutive = self.last_age is not None and age == self.last_age + 1
         events: list[dict[str, Any]] = []
+        self.trail.append({
+            "age": age,
+            "up_bid": books["UP"].bid, "up_ask": books["UP"].ask,
+            "down_bid": books["DOWN"].bid, "down_ask": books["DOWN"].ask,
+        })
+        self.trail = self.trail[-TRAIL_LIMIT:]
 
         if self.stage == "WATCHING" and age > SIGNAL_AGE:
             self.stage, self.reason = "MISSED", "age30_not_sampled"
@@ -228,6 +236,12 @@ class QualityShadowState:
             "switch_bid": text(self.switch_bid), "opposite_ask": text(self.opposite_ask),
             "extra_capital": text(self.extra_capital), "winner": self.winner,
             "pnl": text(self.pnl),
+            "trail": [
+                {"age": row["age"],
+                 "up_bid": text(row["up_bid"]), "up_ask": text(row["up_ask"]),
+                 "down_bid": text(row["down_bid"]), "down_ask": text(row["down_ask"])}
+                for row in self.trail
+            ],
         }
 
     @classmethod
@@ -252,7 +266,27 @@ class QualityShadowState:
         for name in ("switch_due_age", "switch_age"):
             raw = payload.get(name); setattr(state, name, None if raw is None else int(raw))
         state.winner = payload.get("winner")
+        raw_trail = payload.get("trail", ())
+        if not isinstance(raw_trail, (list, tuple)) or len(raw_trail) > TRAIL_LIMIT:
+            raise ValueError("quality snapshot trail is invalid")
+        last_trail_age: int | None = None
+        for raw_row in raw_trail:
+            if not isinstance(raw_row, Mapping):
+                raise ValueError("quality snapshot trail row is invalid")
+            trail_age = int(raw_row["age"])
+            if last_trail_age is not None and trail_age <= last_trail_age:
+                raise ValueError("quality snapshot trail ages must increase")
+            restored_books = {
+                "UP": QualityBook(Decimal(str(raw_row["up_bid"])), Decimal(str(raw_row["up_ask"]))),
+                "DOWN": QualityBook(Decimal(str(raw_row["down_bid"])), Decimal(str(raw_row["down_ask"]))),
+            }
+            state.trail.append({
+                "age": trail_age,
+                "up_bid": restored_books["UP"].bid, "up_ask": restored_books["UP"].ask,
+                "down_bid": restored_books["DOWN"].bid, "down_ask": restored_books["DOWN"].ask,
+            })
+            last_trail_age = trail_age
         return state
 
 
-__all__ = ["QualityBook", "QualityShadowState"]
+__all__ = ["QualityBook", "QualityShadowState", "TRAIL_LIMIT"]

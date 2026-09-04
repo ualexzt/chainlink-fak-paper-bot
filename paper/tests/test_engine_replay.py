@@ -697,6 +697,9 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         self.now_ms[0] = self.now[0] * 1000
         await engine.reconcile_settlements()
         self.assertEqual(engine.quality_states[definition.market_id].stage, "SETTLED")
+        self.assertEqual(len(engine.quality_results), 1)
+        self.assertEqual(engine.quality_results[0]["winner"], "DOWN")
+        self.assertEqual(engine.quality_results[0]["trail"], [])
         for table in ("signals", "paper_orders", "monte_carlo_forecasts", "settlements"):
             self.assertEqual(engine.storage.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
 
@@ -711,6 +714,14 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event_types.count("quality_switch"), 1)
         self.assertEqual(event_types.count("quality_settlement"), 1)
         self.assertEqual({row["source"] for row in rows}, {"quality_shadow"})
+        engine.storage.close()
+        engine.journal.close()
+        restarted = await self.make_engine(
+            (definition,), db_name="quality.db", journal_name="quality-results-restart",
+            settlement_fetcher=fetch,
+        )
+        self.assertEqual(len(restarted.quality_results), 1)
+        self.assertEqual(restarted.quality_results[0]["winner"], "DOWN")
 
     async def test_quality_shadow_candidate_restores_without_replaying_age_30(self):
         definition = market()

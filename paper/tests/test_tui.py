@@ -135,6 +135,54 @@ class DashboardTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, output)
 
+    def test_quality_shadow_views_render_cards_timeline_and_forward_metrics(self) -> None:
+        storage = Storage(self.path)
+        storage.initialize()
+        snapshot = storage.load_dashboard_snapshot()
+        snapshot["mode"] = "QUALITY_SHADOW_ONLY"
+        snapshot["quality_shadow"] = [{
+            "version": 1, "market_id": "btc-market", "mkt_ts": 1_000,
+            "symbol": "btc", "stage": "ENTERED", "reason": None,
+            "last_age": 200, "last_recorded_age": 200,
+            "selected_side": "UP", "p30": "0.64", "entry_ask": "0.90",
+            "filter_a": False, "filter_b": False, "repair_run": 2,
+            "switch_age": None,
+            "trail": [
+                {"age": age, "up_bid": str(price - D("0.01")), "up_ask": str(price),
+                 "down_bid": str(D("0.99") - price), "down_ask": str(D("1.01") - price)}
+                for age, price in ((196, D("0.86")), (197, D("0.88")),
+                                   (198, D("0.87")), (199, D("0.91")), (200, D("0.90")))
+            ],
+        }]
+        snapshot["quality_results"] = [{
+            "stage": "SETTLED", "market_id": "eth-old", "mkt_ts": 700,
+            "symbol": "eth", "selected_side": "DOWN", "p30": "0.70",
+            "entry_ask": "0.93", "switch_age": 168, "winner": "UP",
+            "pnl": "-0.032258", "trail": [],
+        }]
+        storage.write_dashboard_snapshot(snapshot, 1_200_000)
+        storage.close()
+
+        overview = self.rendered()
+        for expected in ("QUALITY SHADOW · NO ORDERS", "ASK TREND", "Live decision rail",
+                         "30s SIGNAL", "REPAIR WINDOW", "watch 2/3"):
+            self.assertIn(expected, overview)
+        performance = self.rendered(view="performance")
+        for expected in ("SIGNAL HIT", "ENTRIES", "REPAIRS", "PAPER NET",
+                         "Forward score by asset", "Recent settled decisions", "SWITCH @168s"):
+            self.assertIn(expected, performance)
+        activity = self.rendered(view="activity")
+        self.assertIn("Live strategy timeline", activity)
+        self.assertIn("Decision tape", activity)
+        for view in ("overview", "performance", "activity"):
+            dashboard = PaperDashboard(self.path, view=view, clock_s=lambda: 1_200)
+            console = Console(record=True, width=120, height=40, file=io.StringIO())
+            console.print(dashboard.render())
+            fixed = console.export_text()
+            dashboard.close()
+            self.assertTrue(fixed.strip())
+            self.assertLessEqual(max(map(len, fixed.splitlines())), 120)
+
     def test_closed_unsettled_inventory_is_clearly_labelled(self) -> None:
         output = self.rendered(clock_s=1_400)
         self.assertIn("AWAITING SETTLEMENT", output)

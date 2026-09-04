@@ -24,6 +24,7 @@ from .storage import DashboardReadModel, Storage
 ZERO = Decimal("0")
 BASE_CONFIRMATIONS = {"BOOK_ONLY", "CHAINLINK_DIRECTION", "CHAINLINK_CONFIRMED"}
 MC_MODEL = "twap-first-valid-window-bootstrap-v3"
+SPARKS = "▁▂▃▄▅▆▇█"
 
 
 def _decimal(value: Any) -> Decimal:
@@ -46,6 +47,25 @@ def _fmt(value: Any, places: int = 4) -> str:
     except ValueError:
         return str(value)
     return f"{decimal:.{places}f}".rstrip("0").rstrip(".")
+
+
+def _sparkline(values: list[Decimal], width: int = 22) -> str:
+    values = values[-width:]
+    if not values:
+        return "·" * min(width, 8)
+    low, high = min(values), max(values)
+    if high == low:
+        return SPARKS[len(SPARKS) // 2] * len(values)
+    scale = Decimal(len(SPARKS) - 1) / (high - low)
+    return "".join(SPARKS[int((value - low) * scale)] for value in values)
+
+
+def _meter(value: int, total: int = 300, width: int = 22) -> str:
+    bounded = max(0, min(total, value))
+    filled = min(width, int(Decimal(bounded) * width / total))
+    if filled >= width:
+        return "━" * width
+    return "━" * filled + "╺" + "─" * max(0, width - filled - 1)
 
 
 class PaperDashboard:
@@ -286,6 +306,222 @@ class PaperDashboard:
             ))
         return rows
 
+    @staticmethod
+    def _quality_phase(age: int, stage: str) -> tuple[str, str]:
+        if stage in {"NO_SIGNAL", "REJECTED", "MISSED"}:
+            return "DONE", "dim"
+        if stage == "SWITCHED":
+            return "SWITCHED", "bold magenta"
+        if age < 30:
+            return f"SIGNAL IN {30 - age}s", "cyan"
+        if age < 120:
+            return f"FILTERING {120 - age}s", "yellow"
+        if age <= 240:
+            return "REPAIR WINDOW", "bright_cyan"
+        return "HOLD → SETTLE", "green"
+
+    @staticmethod
+    def _quality_state_map(snapshot: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+        return {
+            str(row.get("market_id")): row
+            for row in snapshot.get("quality_shadow", ())
+            if isinstance(row, Mapping)
+        }
+
+    def _quality_card(
+        self, market: Mapping[str, Any], state: Mapping[str, Any],
+        resolver: Mapping[str, Any] | None,
+    ) -> Panel:
+        now_s = int(self._clock_s())
+        age = max(0, min(300, now_s - int(market.get("mkt_ts", now_s))))
+        remaining = max(0, int(market.get("close_ts", now_s)) - now_s)
+        symbol = str(market.get("symbol", "?")).upper()
+        stage = str(state.get("stage", "WATCHING"))
+        phase, phase_style = self._quality_phase(age, stage)
+        side = state.get("selected_side")
+        books = market.get("books", {}) if isinstance(market.get("books"), Mapping) else {}
+        up = books.get("UP", {}) if isinstance(books.get("UP"), Mapping) else {}
+        down = books.get("DOWN", {}) if isinstance(books.get("DOWN"), Mapping) else {}
+        books_ok = bool(up.get("valid")) and bool(down.get("valid"))
+
+        trail = state.get("trail", ())
+        values: list[Decimal] = []
+        if isinstance(trail, (list, tuple)):
+            key = "down_ask" if side == "DOWN" else "up_ask" if side == "UP" else None
+            for point in trail:
+                if not isinstance(point, Mapping):
+                    continue
+                raw = point.get(key) if key else max(
+                    _decimal(point.get("up_ask", 0)), _decimal(point.get("down_ask", 0)),
+                )
+                try:
+                    values.append(_decimal(raw))
+                except ValueError:
+                    continue
+
+        stage_styles = {
+            "WATCHING": "dim", "CANDIDATE": "bold cyan", "ENTERED": "bold green",
+            "SWITCHED": "bold magenta", "REJECTED": "bold yellow",
+            "NO_SIGNAL": "dim", "MISSED": "bold red",
+        }
+        grid = Table.grid(expand=True, padding=(0, 1))
+        grid.add_column(ratio=1)
+        grid.add_column(justify="right")
+        grid.add_row(
+            Text(f"● {stage}", style=stage_styles.get(stage, "white")),
+            Text(f"{remaining // 60:02d}:{remaining % 60:02d}", style="bold white"),
+        )
+        grid.add_row(
+            Text(f"UP   {_fmt(up.get('best_bid'), 2)} › {_fmt(up.get('best_ask'), 2)}", style="bright_cyan"),
+            Text(f"DOWN {_fmt(down.get('best_bid'), 2)} › {_fmt(down.get('best_ask'), 2)}", style="bright_magenta"),
+        )
+        meter = Text(_meter(age), style="bright_cyan" if stage not in {"REJECTED", "MISSED"} else "yellow")
+        grid.add_row(meter, Text(f"{age:03d}s / 300s", style="dim"))
+        grid.add_row(Text(_sparkline(values), style="cyan"), Text("ASK TREND", style="dim"))
+        signal = f"{side or '—'} @ {_fmt(state.get('p30'), 2)}"
+        entry = f"@ {_fmt(state.get('entry_ask'), 2)}" if state.get("entry_ask") is not None else "—"
+        repair = (
+            f"↻ {state.get('switch_age')}s" if state.get("switch_age") is not None
+            else f"{state.get('repair_run', 0)}/3"
+        )
+        grid.add_row(Text(f"30s {signal}", style="cyan"), Text(f"120s {entry}", style="green"))
+        grid.add_row(Text(f"A {'●' if state.get('filter_a') else '○'}  B {'●' if state.get('filter_b') else '○'}", style="yellow"),
+                     Text(f"repair {repair}", style="magenta"))
+        telemetry = "BOOKS LIVE" if books_ok else "BOOKS WAIT"
+        cl = "CL —" if not resolver else f"CL {resolver.get('leader') or '—'}"
+        grid.add_row(Text(phase, style=phase_style), Text(f"{telemetry} · {cl}", style="green" if books_ok else "red"))
+        return Panel(
+            grid, title=f"[bold]{symbol}[/bold]", title_align="left",
+            subtitle=f"#{str(market.get('market_id', ''))[-7:]}", subtitle_align="right",
+            border_style={"BTC": "bright_yellow", "ETH": "bright_cyan", "SOL": "bright_magenta"}.get(symbol, "bright_black"),
+            box=box.ROUNDED, padding=(0, 1),
+        )
+
+    def _quality_cards(self, snapshot: Mapping[str, Any]) -> Table | Panel:
+        markets = self._current_markets(snapshot)
+        if not markets:
+            return Panel("[dim]Waiting for current five-minute markets…[/dim]", box=box.ROUNDED)
+        states = self._quality_state_map(snapshot)
+        resolvers = {
+            str(row.get("symbol", "")).lower(): row
+            for row in snapshot.get("resolver", ()) if isinstance(row, Mapping)
+        }
+        cards = [
+            self._quality_card(
+                market, states.get(str(market.get("market_id")), {}),
+                resolvers.get(str(market.get("symbol", "")).lower()),
+            )
+            for market in markets
+        ]
+        grid = Table.grid(expand=True, padding=(0, 1))
+        for _ in cards:
+            grid.add_column(ratio=1)
+        grid.add_row(*cards)
+        return grid
+
+    def _quality_flow_rows(self, snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
+        states = self._quality_state_map(snapshot)
+        now_s = int(self._clock_s())
+        rows = []
+        for market in self._current_markets(snapshot):
+            state = states.get(str(market.get("market_id")), {})
+            age = max(0, min(300, now_s - int(market.get("mkt_ts", now_s))))
+            stage = str(state.get("stage", "WATCHING"))
+            phase, _ = self._quality_phase(age, stage)
+            signal = "—" if state.get("selected_side") is None else (
+                f"{state.get('selected_side')} @ {_fmt(state.get('p30'), 2)}"
+            )
+            entry = "—" if state.get("entry_ask") is None else f"${_fmt(state.get('entry_ask'), 2)}"
+            repair = (
+                f"SWITCH @{state.get('switch_age')}s" if state.get("switch_age") is not None
+                else f"watch {state.get('repair_run', 0)}/3"
+            )
+            rows.append((
+                str(market.get("symbol", "?")).upper(), f"{age}s", phase,
+                self._status(stage, {
+                    "ENTERED": "ACTIVE POSITION", "SWITCHED": "ACTIVE POSITION",
+                    "REJECTED": "WARN", "MISSED": "BLOCKED", "CANDIDATE": "EVENT",
+                }.get(stage, "WAIT")),
+                signal, entry, repair, state.get("reason") or "live",
+            ))
+        return rows
+
+    @staticmethod
+    def _quality_results(snapshot: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        return [
+            row for row in snapshot.get("quality_results", ())
+            if isinstance(row, Mapping) and row.get("stage") == "SETTLED"
+        ]
+
+    def _quality_kpis(self, snapshot: Mapping[str, Any]) -> Table:
+        results = self._quality_results(snapshot)
+        signaled = [row for row in results if row.get("selected_side") in {"UP", "DOWN"}]
+        entered = [row for row in results if row.get("entry_ask") is not None]
+        switched = [row for row in entered if row.get("switch_age") is not None]
+        signal_wins = sum(row.get("selected_side") == row.get("winner") for row in signaled)
+        pnls = [_decimal(row["pnl"]) for row in entered if row.get("pnl") is not None]
+        positive = sum(pnl > ZERO for pnl in pnls)
+        net = sum(pnls, ZERO)
+        values = (
+            ("SETTLED", str(len(results)), "official only"),
+            ("SIGNAL HIT", "—" if not signaled else f"{signal_wins / len(signaled):.1%}", f"{signal_wins}/{len(signaled)}"),
+            ("ENTRIES", str(len(entered)), "ask ≥ 0.88"),
+            ("REPAIRS", str(len(switched)), "full switches"),
+            ("POSITIVE", "—" if not pnls else f"{positive / len(pnls):.1%}", f"{positive}/{len(pnls)}"),
+            ("PAPER NET", f"{net:+.3f}" if pnls else "—", "USD · no fees"),
+        )
+        cards = []
+        for title, value, subtitle in values:
+            body = Text(justify="center")
+            body.append(value + "\n", style="bold bright_cyan")
+            body.append(subtitle, style="dim")
+            cards.append(Panel(body, title=title, box=box.ROUNDED, border_style="bright_black"))
+        grid = Table.grid(expand=True, padding=(0, 1))
+        for _ in cards:
+            grid.add_column(ratio=1)
+        grid.add_row(*cards)
+        return grid
+
+    def _quality_result_rows(self, snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
+        rows = []
+        for result in reversed(self._quality_results(snapshot)[-12:]):
+            selected, winner = result.get("selected_side"), result.get("winner")
+            if result.get("entry_ask") is None:
+                action = "NO TRADE"
+                outcome = "NO SIGNAL" if selected is None else "FILTERED"
+                pnl = "—"
+            else:
+                action = "HOLD" if result.get("switch_age") is None else f"SWITCH @{result.get('switch_age')}s"
+                raw_pnl = _decimal(result.get("pnl"))
+                outcome = "POSITIVE" if raw_pnl > ZERO else "NEGATIVE"
+                pnl = f"{raw_pnl:+.4f}"
+            round_utc = datetime.fromtimestamp(int(result.get("mkt_ts", 0)), UTC).strftime("%H:%M")
+            rows.append((
+                str(result.get("symbol", "?")).upper(), round_utc,
+                f"{selected or '—'} @ {_fmt(result.get('p30'), 2)}", _fmt(result.get("entry_ask"), 2),
+                action, winner or "—", self._status(outcome, "OK" if outcome == "POSITIVE" else "WARN"), pnl,
+            ))
+        return rows
+
+    def _quality_asset_rows(self, snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
+        grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+        for row in self._quality_results(snapshot):
+            grouped[str(row.get("symbol", "?")).upper()].append(row)
+        rows = []
+        for symbol, results in sorted(grouped.items()):
+            signaled = [r for r in results if r.get("selected_side") in {"UP", "DOWN"}]
+            entered = [r for r in results if r.get("entry_ask") is not None]
+            wins = sum(r.get("selected_side") == r.get("winner") for r in signaled)
+            pnls = [_decimal(r["pnl"]) for r in entered if r.get("pnl") is not None]
+            rows.append((
+                symbol, len(results), len(signaled),
+                "—" if not signaled else f"{wins / len(signaled):.1%}", len(entered),
+                sum(r.get("switch_age") is not None for r in entered),
+                "—" if not pnls else f"{sum(p > ZERO for p in pnls) / len(pnls):.1%}",
+                "—" if not pnls else f"{sum(pnls, ZERO):+.4f}",
+            ))
+        return rows
+
     def _visible(self, row: Mapping[str, Any], symbols: Mapping[str, str]) -> bool:
         return not any((self.asset is not None and symbols.get(str(row["market_id"])) != self.asset,
                         self.threshold is not None and row["threshold"] != self.threshold,
@@ -422,10 +658,18 @@ class PaperDashboard:
         lag_ms = None if snapshot_ts is None else max(0, now_ms - int(snapshot_ts))
         database_bad = bool(reasons or health.get("pending_storage") or lag_ms is None
                             or lag_ms > max(5_000, int(self.refresh * 3_000)))
+        quality_mode = snapshot.get("mode") == "QUALITY_SHADOW_ONLY"
+        resolver_label = "DELAYED" if stale and quality_mode else "STALE" if stale else "OK"
+        resolver_state = "EVENT" if stale and quality_mode else "STALE" if stale else "OK"
+        resolver_detail = (
+            "context delayed; does not block price-only shadow rule" if stale and quality_mode
+            else "public TWAP-60 context is fresh" if quality_mode
+            else "selected TWAP-60 must be ≤10s old"
+        )
+        resolver_component = "Chainlink context" if quality_mode else "Chainlink resolver"
         rows = [("market books", self._status("BLOCKED" if reconnect else "OK", "BLOCKED" if reconnect else "OK"),
                  "active round awaiting a valid snapshot" if reconnect else "all active UP/DOWN books valid"),
-                ("Chainlink resolver", self._status("STALE" if stale else "OK", "STALE" if stale else "OK"),
-                 "selected TWAP-60 must be ≤10s old"),
+                (resolver_component, self._status(resolver_label, resolver_state), resolver_detail),
                 ("database", self._status("CRITICAL" if database_bad else "OK", "CRITICAL" if database_bad else "OK"),
                  ",".join(reasons) or ("snapshot unavailable" if lag_ms is None else f"snapshot lag={lag_ms}ms")),
                 ("disk / journal", self._status("CRITICAL" if not health.get("journal_writable", False) else "OK",
@@ -458,12 +702,21 @@ class PaperDashboard:
         if self.policy:
             filters.append(self.policy)
         line = Text()
-        line.append(" PAPER ONLY · NO ORDERS ", style="bold white on dark_green")
+        quality_mode = snapshot.get("mode") == "QUALITY_SHADOW_ONLY"
+        line.append(
+            " QUALITY SHADOW · NO ORDERS " if quality_mode else " PAPER ONLY · NO ORDERS ",
+            style="bold white on dark_green",
+        )
         line.append(f"  {self.view.upper()}  ", style="bold bright_cyan")
         line.append(f"● {state}", style=f"bold {color}")
-        line.append(f"   DB {age:.1f}s" if age is not None else "   DB —", style="dim")
-        line.append("   " + " · ".join(filters), style="white")
-        line.append("   views: --view overview|performance|activity", style="dim")
+        if quality_mode:
+            line.append("   ◇30s SIGNAL · ◇120s ENTRY · ↻ REPAIR · ✓ SETTLE", style="cyan")
+            if self.asset:
+                line.append(f"   {self.asset.upper()}", style="white")
+        else:
+            line.append(f"   DB {age:.1f}s" if age is not None else "   DB —", style="dim")
+            line.append("   " + " · ".join(filters), style="white")
+            line.append("   views: --view overview|performance|activity", style="dim")
         return Panel(line, border_style="bright_black", box=box.ROUNDED, padding=(0, 0))
 
     def render(self) -> Layout:
@@ -475,7 +728,60 @@ class PaperDashboard:
         layout.split_column(Layout(name="banner", size=3), Layout(name="content"))
         layout["banner"].update(self._banner(snapshot))
         content = layout["content"]
-        if self.view == "overview":
+        quality_mode = snapshot.get("mode") == "QUALITY_SHADOW_ONLY"
+        if quality_mode and self.view == "overview":
+            content.split_column(
+                Layout(name="cards", size=12), Layout(name="flow", size=8),
+                Layout(name="health", size=7),
+            )
+            content["cards"].update(self._quality_cards(snapshot))
+            content["flow"].update(self._panel(
+                "Live decision rail",
+                ("asset", "age", "phase", "state", "30s signal", "120s entry", "repair", "decision"),
+                self._quality_flow_rows(snapshot),
+                subtitle="causal · exact-second · forward sample",
+            ))
+            content["health"].update(self._panel(
+                "Telemetry deck", ("component", "state", "current detail"),
+                self._health_rows(data, snapshot),
+                subtitle="books drive decisions · Chainlink is context only",
+            ))
+        elif quality_mode and self.view == "performance":
+            content.split_column(
+                Layout(name="kpis", size=6), Layout(name="assets", size=8),
+                Layout(name="results", ratio=1),
+            )
+            content["kpis"].update(self._quality_kpis(snapshot))
+            content["assets"].update(self._panel(
+                "Forward score by asset",
+                ("asset", "settled", "signals", "signal hit", "entries", "repairs", "positive", "paper net"),
+                self._quality_asset_rows(snapshot), subtitle="officially settled only · no fees",
+            ))
+            content["results"].update(self._panel(
+                "Recent settled decisions",
+                ("asset", "round UTC", "signal", "entry", "action", "winner", "result", "PnL"),
+                self._quality_result_rows(snapshot), subtitle="latest 12 · observational USD 1 stake",
+            ))
+        elif quality_mode and self.view == "activity":
+            content.split_column(
+                Layout(name="flow", size=9), Layout(name="results", ratio=2),
+                Layout(name="health", ratio=1),
+            )
+            content["flow"].update(self._panel(
+                "Live strategy timeline",
+                ("asset", "age", "phase", "state", "30s signal", "120s entry", "repair", "decision"),
+                self._quality_flow_rows(snapshot), subtitle="30 → 120 → repair → official settlement",
+            ))
+            content["results"].update(self._panel(
+                "Decision tape",
+                ("asset", "round UTC", "signal", "entry", "action", "winner", "result", "PnL"),
+                self._quality_result_rows(snapshot), subtitle="settled paper observations",
+            ))
+            content["health"].update(self._panel(
+                "Feed and storage timeline", ("component", "state", "current detail"),
+                self._health_rows(data, snapshot, include_events=True),
+            ))
+        elif self.view == "overview":
             content.split_column(
                 Layout(name="pulse", size=6), Layout(name="signals", size=6),
                 Layout(name="positions", size=7), Layout(name="health", size=7),

@@ -18,6 +18,12 @@ warning filters through ages 90/120, entry eligibility at age 120 with
 `ask >= 0.88`, and at most one full-switch repair after a three-second `0.20` bid
 drawdown (trigger no later than age 240, execution on the next observed second).
 These are observational paper actions only; no venue order is constructed or sent.
+In this mode the overview uses live asset cards with a 300-second progress rail,
+recent ask sparkline, exact 30/120-second milestones, warning-filter lights, and
+repair state. `--view performance` shows only forward, officially settled shadow
+results; `--view activity` separates the live decision timeline from the settled
+decision tape. Paper PnL remains explicitly fee-free and is never presented as a
+live fill or account balance.
 
 ## Local operation
 

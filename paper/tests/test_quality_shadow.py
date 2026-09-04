@@ -1,7 +1,7 @@
 from decimal import Decimal as D
 import unittest
 
-from paper_bot.quality_shadow import QualityBook, QualityShadowState
+from paper_bot.quality_shadow import QualityBook, QualityShadowState, TRAIL_LIMIT
 
 
 def books(up_ask: str, down_ask: str, *, up_bid: str | None = None, down_bid: str | None = None):
@@ -101,6 +101,15 @@ class QualityShadowTests(unittest.TestCase):
         self.assertEqual(event["event_type"], "quality_no_signal")
         self.assertEqual(state.stage, "NO_SIGNAL")
         self.assertEqual(state.sample(120, books("0.95", "0.06")), ())
+
+    def test_price_trail_is_bounded_and_round_trips(self):
+        state = QualityShadowState("m", 1000, "btc")
+        for age in range(70):
+            state.sample(age, books("0.64", "0.37"))
+        self.assertEqual(len(state.trail), TRAIL_LIMIT)
+        self.assertEqual(state.trail[0]["age"], 70 - TRAIL_LIMIT)
+        restored = QualityShadowState.restore(state.snapshot())
+        self.assertEqual(restored.trail, state.trail)
 
 
 if __name__ == "__main__":

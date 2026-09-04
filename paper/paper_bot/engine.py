@@ -78,6 +78,7 @@ class PaperEngine:
         self.strategies: dict[str, MarketStrategyState] = {}
         self.monte_carlo_strategies: dict[str, MonteCarloShadowState] = {}
         self.quality_states: dict[str, QualityShadowState] = {}
+        self.quality_results: list[dict[str, Any]] = []
         self.positions: dict[str, dict[LaneKey, LanePosition]] = {}
         self._token_market: dict[str, str] = {}
         self._settled: set[str] = set()
@@ -138,6 +139,14 @@ class PaperEngine:
             self._restore_market(persisted, self.markets[market_id])
         previous_snapshot = self.storage.load_dashboard_snapshot()
         if self.settings.quality_shadow_only and previous_snapshot is not None:
+            for payload in previous_snapshot.get("quality_results", ()):
+                if not isinstance(payload, Mapping):
+                    continue
+                restored_result = QualityShadowState.restore(payload)
+                if restored_result.stage != "SETTLED":
+                    raise EngineInvariantError("quality result is not settled")
+                self.quality_results.append(restored_result.snapshot())
+            self.quality_results = self.quality_results[-250:]
             for payload in previous_snapshot.get("quality_shadow", ()):
                 if not isinstance(payload, Mapping):
                     continue
@@ -433,6 +442,7 @@ class PaperEngine:
                     market_id not in self._inactive or self.quality_states[market_id].observed
                 )
             ],
+            "quality_results": list(self.quality_results),
             "health": {
                 "storage": self.storage_critical_reason,
                 "dashboard": self.dashboard_critical_reason,
@@ -671,6 +681,10 @@ class PaperEngine:
                 except (JournalError, OSError, TypeError, ValueError):
                     return
                 self.quality_states[market.market_id] = next_quality
+                result_snapshot = next_quality.snapshot()
+                result_snapshot["trail"] = []
+                self.quality_results.append(result_snapshot)
+                self.quality_results = self.quality_results[-250:]
             results = tuple(settle_lane(position, settlement) for position in positions.values())
             if positions or observed:
                 try:
