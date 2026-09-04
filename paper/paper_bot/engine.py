@@ -429,7 +429,9 @@ class PaperEngine:
             "quality_shadow": [
                 self.quality_states[market_id].snapshot()
                 for market_id in sorted(self.quality_states)
-                if market_id not in self._settled
+                if market_id not in self._settled and (
+                    market_id not in self._inactive or self.quality_states[market_id].observed
+                )
             ],
             "health": {
                 "storage": self.storage_critical_reason,

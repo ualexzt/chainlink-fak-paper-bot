@@ -742,6 +742,18 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         restarted._sample_quality_shadow(self.now[0], self.now_ms[0])
         self.assertFalse(tuple((self.root / "quality-after-restart").glob("*.jsonl")))
 
+    async def test_quality_dashboard_hides_unobserved_inactive_state(self):
+        definition = market()
+        self.settings = replace(self.settings, quality_shadow_only=True)
+        self.now[0] = definition.end_ts + 1
+        self.now_ms[0] = self.now[0] * 1000
+        engine = await self.make_engine(())
+        engine._register_markets((definition,))
+        engine._retire_expired_empty_markets(self.now[0])
+        self.assertNotIn(definition.market_id, {
+            row["market_id"] for row in engine._dashboard_payload()["quality_shadow"]
+        })
+
     async def test_transient_dashboard_write_failure_gates_then_recovers(self):
         engine = await self.make_engine((market(),), db_name="dashboard-retry.db")
         original = engine.storage.write_dashboard_snapshot
