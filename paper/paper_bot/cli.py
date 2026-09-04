@@ -32,7 +32,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("check-db", help="run read-only SQLite integrity checks")
     watch = commands.add_parser("watch", help="attach a read-only terminal dashboard")
     watch.add_argument("--db", required=True, help="SQLite database path")
-    watch.add_argument("--refresh", type=float, default=2.0, help="refresh interval in seconds")
+    watch.add_argument("--refresh", type=float, default=0.5, help="refresh interval in seconds")
     watch.add_argument("--view", choices=("overview", "performance", "activity"), default="overview")
     watch.add_argument("--asset", choices=("btc", "eth", "sol"))
     watch.add_argument("--threshold")

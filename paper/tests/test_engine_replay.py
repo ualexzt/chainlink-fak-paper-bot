@@ -570,6 +570,10 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["markets"][0]["books"]["DOWN"]["ask_depth"], "20")
         self.assertEqual(snapshot["resolver"][0]["start"], "100")
         self.assertEqual(snapshot["resolver"][0]["current"], "101")
+        self.assertEqual(snapshot["resolver"][0]["trail"], [
+            {"observation_ts_ms": 900_000, "value": "100"},
+            {"observation_ts_ms": 1_100_000, "value": "101"},
+        ])
         self.assertTrue(snapshot["health"]["journal_writable"])
         self.assertIsInstance(snapshot["health"]["disk_free_bytes"], int)
 
@@ -790,6 +794,27 @@ class EngineReplayTests(unittest.IsolatedAsyncioTestCase):
             rows.extend(json.loads(line) for line in path.read_text().splitlines())
         seconds = [row for row in rows if row["payload"]["event_type"] == "quality_second"]
         self.assertEqual(len(seconds), 2, "ages 29 and 30 are written once despite subsecond polling")
+
+    async def test_quality_dashboard_publishes_at_half_second_cadence_without_duplicate_samples(self):
+        definition = market()
+        self.settings = replace(self.settings, quality_shadow_only=True)
+        self.now[0] = definition.mkt_ts + 29
+        self.now_ms[0] = self.now[0] * 1000
+
+        async def advance(delay):
+            self.now_ms[0] += 200
+            if self.now_ms[0] >= definition.mkt_ts * 1000 + 29_800:
+                raise asyncio.CancelledError
+
+        engine = await self.make_engine((definition,), sleep=advance)
+        await self.seed_books(engine, definition)
+        published = []
+        engine._write_dashboard_snapshot = lambda: published.append(self.now_ms[0])
+        with self.assertRaises(asyncio.CancelledError):
+            await engine._heartbeat_loop()
+        self.assertEqual(published, [definition.mkt_ts * 1000 + 29_000,
+                                     definition.mkt_ts * 1000 + 29_600])
+        self.assertEqual(engine.quality_states[definition.market_id].last_age, 29)
 
     async def test_transient_dashboard_write_failure_gates_then_recovers(self):
         engine = await self.make_engine((market(),), db_name="dashboard-retry.db")

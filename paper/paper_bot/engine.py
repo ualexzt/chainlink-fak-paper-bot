@@ -429,6 +429,10 @@ class PaperEngine:
                     "fresh": view.fresh, "distance": view.distance,
                     "distance_bps": view.distance_bps, "leader": view.leader,
                     "momentum_5s_bps": view.momentum_5s_bps,
+                    "trail": [
+                        {"observation_ts_ms": timestamp, "value": value}
+                        for timestamp, value in self.resolver.history(symbol)[-48:]
+                    ],
                 })
                 break
         return {
@@ -741,8 +745,10 @@ class PaperEngine:
 
     async def _heartbeat_loop(self) -> None:
         last_maintenance_s: int | None = None
+        last_dashboard_ms: int | None = None
         while True:
             now_s = self._now_s()
+            now_ms = self._now_ms()
             if now_s != last_maintenance_s:
                 now = datetime.fromtimestamp(now_s, UTC)
                 try:
@@ -751,11 +757,17 @@ class PaperEngine:
                 except JournalError:
                     pass
                 if self.settings.quality_shadow_only:
-                    self._sample_quality_shadow(now_s, self._now_ms())
+                    self._sample_quality_shadow(now_s, now_ms)
                 await self._retry_pending_storage()
                 self._retire_expired_empty_markets(now_s)
-                self._write_dashboard_snapshot()
+                if not self.settings.quality_shadow_only:
+                    self._write_dashboard_snapshot()
                 last_maintenance_s = now_s
+            if self.settings.quality_shadow_only and (
+                last_dashboard_ms is None or now_ms - last_dashboard_ms >= 500
+            ):
+                self._write_dashboard_snapshot()
+                last_dashboard_ms = now_ms
             poll_interval = (
                 min(self.heartbeat_interval, 0.2)
                 if self.settings.quality_shadow_only else self.heartbeat_interval

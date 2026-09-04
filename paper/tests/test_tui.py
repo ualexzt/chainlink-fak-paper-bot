@@ -95,6 +95,10 @@ class DashboardTests(unittest.TestCase):
             "current": D("101"), "observation_ts_ms": 1_199_000, "age_ms": 1_000,
             "fresh": True, "distance": D("1"), "distance_bps": D("100"),
             "leader": "UP", "momentum_5s_bps": D("5"),
+            "trail": [
+                {"observation_ts_ms": 1_198_000, "value": D("100")},
+                {"observation_ts_ms": 1_199_000, "value": D("101")},
+            ],
         } for symbol in ("btc", "eth", "sol")]
         self.storage.write_dashboard_snapshot({
             "version": 1, "experiment_hash": experiment_hash, "markets": market_rows,
@@ -171,7 +175,8 @@ class DashboardTests(unittest.TestCase):
         overview = self.rendered()
         for expected in ("QUALITY SHADOW · NO ORDERS", "ASK TREND", "ALL COINS · overall statistics",
                          "BTC statistics", "ETH statistics", "SOL statistics", "30s SIGNAL",
-                         "120s ENTRY", "REPAIR", "REPAIR WINDOW", "repair 2/3"):
+                         "120s ENTRY", "REPAIR", "REPAIR WINDOW", "repair 2/3",
+                         "ACTIVE SIGNAL  UP", "CL UP · 100 bp", "STATS UPDATE"):
             self.assertIn(expected, overview)
         performance = self.rendered(view="performance")
         for expected in ("ALL COINS · overall statistics", "30s SIGNAL", "120s ENTRY", "REPAIR",

@@ -34,6 +34,13 @@ signal even when the candidate was rejected at age 120 and no trade was modeled;
 tape. Paper PnL remains explicitly fee-free and is never presented as a live fill
 or account balance.
 
+The watcher refreshes every `0.5` seconds by default, while the engine publishes
+read-only dashboard snapshots at the same cadence in quality mode. Each live card
+shows both the selected Polymarket ask trend and a separate Chainlink TWAP-60
+sparkline, plus a prominent `ACTIVE SIGNAL UP/DOWN` badge. Result statistics move
+only after official settlement; the latest settled round is printed explicitly so
+a stable score cannot be mistaken for a stalled dashboard.
+
 ## Local operation
 
 From the repository root:

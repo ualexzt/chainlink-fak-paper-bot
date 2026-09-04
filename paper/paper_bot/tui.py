@@ -71,7 +71,7 @@ def _meter(value: int, total: int = 300, width: int = 22) -> str:
 class PaperDashboard:
     """Render live telemetry and exact accounting through SQLite ``mode=ro``."""
 
-    def __init__(self, db_path: str | Path, refresh: float = 2.0, *,
+    def __init__(self, db_path: str | Path, refresh: float = 0.5, *,
                  asset: str | None = None, threshold: str | None = None,
                  confirmation: str | None = None, policy: str | None = None,
                  view: str = "overview",
@@ -359,6 +359,17 @@ class PaperDashboard:
                 except ValueError:
                     continue
 
+        chainlink_values: list[Decimal] = []
+        resolver_trail = () if not resolver else resolver.get("trail", ())
+        if isinstance(resolver_trail, (list, tuple)):
+            for point in resolver_trail:
+                if not isinstance(point, Mapping):
+                    continue
+                try:
+                    chainlink_values.append(_decimal(point.get("value")))
+                except ValueError:
+                    continue
+
         stage_styles = {
             "WATCHING": "dim", "CANDIDATE": "bold cyan", "ENTERED": "bold green",
             "SWITCHED": "bold magenta", "REJECTED": "bold yellow",
@@ -378,7 +389,21 @@ class PaperDashboard:
         meter = Text(_meter(age), style="bright_cyan" if stage not in {"REJECTED", "MISSED"} else "yellow")
         grid.add_row(meter, Text(f"{age:03d}s / 300s", style="dim"))
         grid.add_row(Text(_sparkline(values), style="cyan"), Text("ASK TREND", style="dim"))
+        cl_leader = "—" if not resolver else resolver.get("leader") or "—"
+        cl_move = "—" if not resolver else _fmt(resolver.get("distance_bps"), 1)
+        grid.add_row(Text(_sparkline(chainlink_values), style="bright_yellow"),
+                     Text(f"CL {cl_leader} · {cl_move} bp", style="yellow"))
         signal = f"{side or '—'} @ {_fmt(state.get('p30'), 2)}"
+        if side == "UP":
+            signal_badge = Text(f"▲ ACTIVE SIGNAL  UP  @ {_fmt(state.get('p30'), 2)}", style="bold bright_cyan")
+        elif side == "DOWN":
+            signal_badge = Text(f"▼ ACTIVE SIGNAL  DOWN  @ {_fmt(state.get('p30'), 2)}", style="bold bright_magenta")
+        else:
+            signal_badge = Text("◇ SIGNAL  awaiting 30s", style="dim")
+        if stage == "SWITCHED" and side in {"UP", "DOWN"}:
+            active_side = "DOWN" if side == "UP" else "UP"
+            signal_badge = Text(f"↻ SWITCHED  {side} → {active_side}", style="bold magenta")
+        grid.add_row(signal_badge, Text(stage, style=stage_styles.get(stage, "white")))
         entry = f"@ {_fmt(state.get('entry_ask'), 2)}" if state.get("entry_ask") is not None else "—"
         repair = (
             f"↻ {state.get('switch_age')}s" if state.get("switch_age") is not None
@@ -511,7 +536,8 @@ class PaperDashboard:
         return table
 
     def _quality_overall(self, snapshot: Mapping[str, Any]) -> Panel:
-        metrics = self._quality_metrics(self._quality_results(snapshot))
+        results = self._quality_results(snapshot)
+        metrics = self._quality_metrics(results)
         body = Table.grid(expand=True)
         body.add_column()
         body.add_row(self._quality_stage_table(metrics))
@@ -526,6 +552,13 @@ class PaperDashboard:
             style="bold white",
         ))
         body.add_row(Text("repair +/− = better / not better than holding the original side", style="dim cyan"))
+        latest_round = "—" if not results else datetime.fromtimestamp(
+            max(int(row.get("mkt_ts", 0)) for row in results), UTC
+        ).strftime("%H:%M UTC")
+        body.add_row(Text(
+            f"STATS UPDATE: official settlement only · latest settled round {latest_round}",
+            style="bold yellow",
+        ))
         return Panel(
             body, title="[bold]ALL COINS · overall statistics[/bold]", title_align="left",
             subtitle="official settlement · USD 1 · no fees", subtitle_align="right",
@@ -833,7 +866,7 @@ class PaperDashboard:
         quality_mode = snapshot.get("mode") == "QUALITY_SHADOW_ONLY"
         if quality_mode and self.view == "overview":
             content.split_column(
-                Layout(name="cards", size=12), Layout(name="overall", size=9),
+                Layout(name="cards", size=12), Layout(name="overall", size=10),
                 Layout(name="assets", size=12), Layout(name="health", size=6),
             )
             content["cards"].update(self._quality_cards(snapshot))
@@ -846,7 +879,7 @@ class PaperDashboard:
             ))
         elif quality_mode and self.view == "performance":
             content.split_column(
-                Layout(name="overall", size=9), Layout(name="assets", size=12),
+                Layout(name="overall", size=10), Layout(name="assets", size=12),
                 Layout(name="results", ratio=1),
             )
             content["overall"].update(self._quality_overall(snapshot))
@@ -947,7 +980,7 @@ class PaperDashboard:
             self.close()
 
 
-def watch(db_path: str | Path, refresh: float = 2.0, **filters: str | None) -> int:
+def watch(db_path: str | Path, refresh: float = 0.5, **filters: str | None) -> int:
     try:
         asyncio.run(PaperDashboard(db_path, refresh, **filters).run())
     except KeyboardInterrupt:
